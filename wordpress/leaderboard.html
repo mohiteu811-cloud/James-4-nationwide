@@ -1,0 +1,107 @@
+<!--
+  Public leaderboard — paste into a BlockArt "Custom HTML" block.
+  Arcade-style "high scores" of REFERRALS (never votes). Aliases only — no
+  identities (Build Brief §6 / docs/outreach-engine-design.md).
+
+  Replace WORKER_BASE with your deployed worker URL.
+
+  PRIZE DRAW NOTE: the countdown below is for a draw whose entries are earned by
+  *referrals/shares only* — never by whether or how someone voted. Get the draw
+  mechanics signed off before going live (see the design doc, guardrail 6).
+-->
+<style>
+  .j4n-lb { max-width: 560px; margin: 0 auto; padding: 1.25rem; font-family: -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; color: #111827; }
+  .j4n-lb h2 { text-align: center; font-size: 1.7rem; margin: 0 0 .25rem; }
+  .j4n-lb .j4n-sub { text-align: center; color: #374151; margin: 0 0 1rem; }
+  .j4n-timer { text-align: center; background: #111827; color: #fbbf24; font-weight: 700; font-size: 1.15rem; letter-spacing: .04em; padding: .7rem; border-radius: 8px; margin-bottom: 1rem; }
+  .j4n-row { display: flex; align-items: center; gap: .75rem; padding: .7rem .9rem; border-radius: 8px; margin-bottom: .4rem; background: #f9fafb; font-size: 1.05rem; }
+  .j4n-row .rank { font-weight: 800; width: 2.2rem; color: #0b6e4f; font-size: 1.2rem; }
+  .j4n-row .alias { flex: 1; font-weight: 600; }
+  .j4n-row .count { font-weight: 800; color: #0b6e4f; }
+  .j4n-row.top1 { background: #fef3c7; }
+  .j4n-row.top2 { background: #f1f5f9; }
+  .j4n-row.top3 { background: #fdf2e9; }
+  .j4n-you { border: 2px dashed #1d4ed8; background: #eef2ff; }
+  .j4n-foot { text-align: center; color: #6b7280; font-size: .85rem; margin-top: 1rem; }
+</style>
+
+<section class="j4n-lb">
+  <h2>🏆 Top recruiters</h2>
+  <p class="j4n-sub">Members bringing the most voters to the ballot. Share your link to climb.</p>
+
+  <div class="j4n-timer" id="j4n-timer">Next prize draw in —:—:—</div>
+
+  <div id="j4n-board"><p style="text-align:center;color:#6b7280">Loading the high scores…</p></div>
+
+  <p class="j4n-foot">Anonymised — aliases only. Ranks count referrals, not votes. Entries to the prize draw are earned by sharing your link.</p>
+</section>
+
+<script>
+  (function () {
+    var WORKER_BASE = "WORKER_BASE"; // <-- replace with your deployed worker URL
+
+    // Daily draw at 20:00 Europe/London (adjust as needed).
+    var DRAW_HOUR_LOCAL = 20;
+
+    function getMyCode() {
+      try {
+        var p = new URLSearchParams(location.search).get("code");
+        if (p) return p.trim();
+        return localStorage.getItem("j4n_my_code");
+      } catch (e) { return null; }
+    }
+
+    function medal(rank) { return rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : ""; }
+
+    function render(data) {
+      var board = document.getElementById("j4n-board");
+      if (!data.top || !data.top.length) {
+        board.innerHTML = '<p style="text-align:center;color:#6b7280">Be the first on the board — share your link!</p>';
+      } else {
+        board.innerHTML = data.top.map(function (e) {
+          var cls = e.rank <= 3 ? " top" + e.rank : "";
+          return '<div class="j4n-row' + cls + '"><span class="rank">' + e.rank + '</span>' +
+            '<span class="alias">' + medal(e.rank) + ' ' + escapeHtml(e.alias) + '</span>' +
+            '<span class="count">' + e.count + '</span></div>';
+        }).join("");
+      }
+      if (data.you) {
+        board.innerHTML += '<div class="j4n-row j4n-you"><span class="rank">#' + data.you.rank +
+          '</span><span class="alias">You — ' + escapeHtml(data.you.alias) + '</span>' +
+          '<span class="count">' + data.you.count + '</span></div>';
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"]/g, function (c) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+      });
+    }
+
+    function load() {
+      var code = getMyCode();
+      var u = WORKER_BASE + "/leaderboard?limit=20" + (code ? "&code=" + encodeURIComponent(code) : "");
+      fetch(u).then(function (r) { return r.json(); }).then(render).catch(function () {
+        document.getElementById("j4n-board").innerHTML =
+          '<p style="text-align:center;color:#6b7280">Leaderboard is warming up — check back soon.</p>';
+      });
+    }
+
+    function tickTimer() {
+      var now = new Date();
+      var next = new Date(now);
+      next.setHours(DRAW_HOUR_LOCAL, 0, 0, 0);
+      if (next <= now) next.setDate(next.getDate() + 1);
+      var d = Math.max(0, next - now);
+      var h = Math.floor(d / 3.6e6), m = Math.floor((d % 3.6e6) / 6e4), s = Math.floor((d % 6e4) / 1000);
+      document.getElementById("j4n-timer").textContent =
+        "⏳ Next prize draw in " + pad(h) + ":" + pad(m) + ":" + pad(s);
+    }
+    function pad(n) { return (n < 10 ? "0" : "") + n; }
+
+    load();
+    setInterval(load, 30000);
+    tickTimer();
+    setInterval(tickTimer, 1000);
+  })();
+</script>

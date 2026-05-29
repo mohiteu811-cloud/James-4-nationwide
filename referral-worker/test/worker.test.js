@@ -51,6 +51,7 @@ function makeEnv() {
     env: {
       MAILERLITE_API_TOKEN: "test-token",
       WEBHOOK_SECRET: "s3cret",
+      STAFF_TOKEN: "staff-s3cret",
       SITE_BASE_URL: "https://james4nationwide.co.uk",
       REFERRALS: kv,
     },
@@ -156,4 +157,137 @@ test("unconfirmed subscribers are not credited", async () => {
   });
 
   assert.equal(ctx.subscribers.get(referrer.id).fields.referral_count, 0);
+});
+
+/* ----------------------------- leaderboard ----------------------------- */
+
+test("crediting a referrer puts them on the anonymised leaderboard", async () => {
+  const ctx = makeEnv();
+  const referrer = ctx.addSubscriber({
+    email: "ref@example.com",
+    fields: { referral_code: "LEAD123", referral_count: 0 },
+  });
+  await ctx.kv.put("code:LEAD123", referrer.id);
+
+  // two confirmed referrals through LEAD123
+  for (const email of ["a@example.com", "b@example.com"]) {
+    const n = ctx.addSubscriber({ email, status: "active", fields: { referred_by: "LEAD123" } });
+    await call(ctx.env, "https://w/webhook?token=s3cret", {
+      method: "POST",
+      body: JSON.stringify({ events: [{ data: { subscriber: { id: n.id, status: "active" } } }] }),
+    });
+  }
+
+  const res = await call(ctx.env, "https://w/leaderboard?code=LEAD123");
+  const body = await res.json();
+
+  assert.equal(body.top.length, 1);
+  assert.equal(body.top[0].rank, 1);
+  assert.equal(body.top[0].count, 2);
+  assert.match(body.top[0].alias, /^[A-Z][a-z]+ [A-Z][a-z]+$/); // "Swift Otter"
+  assert.ok(!("code" in body.top[0])); // never leak the code/identity
+  assert.deepEqual(body.you, { rank: 1, alias: body.top[0].alias, count: 2 });
+});
+
+/* --------------------------- staffer console --------------------------- */
+
+const staff = (env, path, init = {}) =>
+  call(env, "https://w" + path, {
+    ...init,
+    headers: { "x-staff-token": "staff-s3cret", ...(init.headers || {}) },
+  });
+
+test("staff endpoints reject a missing token", async () => {
+  const ctx = makeEnv();
+  const res = await call(ctx.env, "https://w/staff/stats");
+  assert.equal(res.status, 401);
+});
+
+test("opportunity lifecycle: create -> round-robin assign -> convert -> stats", async () => {
+  const ctx = makeEnv();
+  await staff(ctx.env, "/staff/roster", {
+    method: "POST",
+    body: JSON.stringify({ roster: ["Alex", "Sam"] }),
+  });
+
+  const ids = [];
+  for (const topic of ["FairerShare", "AGM", "Quick Vote"]) {
+    const r = await staff(ctx.env, "/staff/opportunities", {
+      method: "POST",
+      body: JSON.stringify({ topic, platform: "x", postUrl: "https://x.com/p/" + topic }),
+    });
+    ids.push((await r.json()).opportunity.id);
+  }
+
+  const assignRes = await staff(ctx.env, "/staff/assign", { method: "POST", body: "{}" });
+  const assign = await assignRes.json();
+  assert.equal(assign.assigned, 3);
+  // round robin Alex, Sam, Alex
+  assert.deepEqual(
+    assign.assignments.map((a) => a.assignedTo),
+    ["Alex", "Sam", "Alex"]
+  );
+
+  // convert the first one
+  await staff(ctx.env, "/staff/opportunities/" + ids[0], {
+    method: "POST",
+    body: JSON.stringify({ status: "converted", outcome: "pledged", followedUp: true }),
+  });
+
+  const stats = await (await staff(ctx.env, "/staff/stats")).json();
+  assert.equal(stats.total, 3);
+  assert.equal(stats.byStatus.assigned, 2);
+  assert.equal(stats.byStatus.converted, 1);
+  assert.equal(stats.byOutcome.pledged, 1);
+  assert.equal(stats.followedUp, 1);
+  assert.equal(stats.byStaffer.Alex.converted, 1);
+});
+
+test("re-work is capped so it can never become repeat unsolicited contact", async () => {
+  const ctx = makeEnv();
+  const r = await staff(ctx.env, "/staff/opportunities", {
+    method: "POST",
+    body: JSON.stringify({ topic: "FairerShare" }),
+  });
+  const id = (await r.json()).opportunity.id;
+
+  // send to rework MAX_REWORK (2) times — both allowed
+  for (let i = 0; i < 2; i++) {
+    const res = await staff(ctx.env, "/staff/opportunities/" + id, {
+      method: "POST",
+      body: JSON.stringify({ status: "rework" }),
+    });
+    assert.equal((await res.json()).opportunity.status, "rework");
+  }
+  // third time trips the cap -> auto-dropped
+  const res = await staff(ctx.env, "/staff/opportunities/" + id, {
+    method: "POST",
+    body: JSON.stringify({ status: "rework" }),
+  });
+  const body = await res.json();
+  assert.equal(body.note, "rework_cap_reached_dropped");
+  assert.equal(body.opportunity.status, "dropped");
+});
+
+test("claim pulls the highest-priority item first", async () => {
+  const ctx = makeEnv();
+  await staff(ctx.env, "/staff/opportunities", {
+    method: "POST",
+    body: JSON.stringify({ topic: "low", priority: 1 }),
+  });
+  await staff(ctx.env, "/staff/opportunities", {
+    method: "POST",
+    body: JSON.stringify({ topic: "high", priority: 3 }),
+  });
+
+  const claimed = await (
+    await staff(ctx.env, "/staff/claim", {
+      method: "POST",
+      body: JSON.stringify({ staffer: "Sam" }),
+    })
+  ).json();
+
+  assert.equal(claimed.claimed.topic, "high");
+  assert.equal(claimed.claimed.assignedTo, "Sam");
+  assert.equal(claimed.claimed.status, "assigned");
 });

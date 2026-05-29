@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>James4Nationwide — Staffer console</title>
+<!--
+  Operational tool for on-duty staffers (NOT a public page). Host it anywhere
+  static (or open locally) and point it at the deployed worker.
+
+  Guardrails baked in (docs/outreach-engine-design.md):
+   - Opportunities reference PUBLIC posts + workflow state only. No follower
+     counts / profiling fields.
+   - "Did you vote?" logs only THAT a follow-up happened — never the answer.
+   - Re-work is capped server-side; the 3rd attempt auto-drops.
+   - Engage in public where you can; never mass-DM.
+-->
+<style>
+  :root { --green:#0b6e4f; --blue:#1d4ed8; --ink:#111827; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:var(--ink); background:#f3f4f6; }
+  header { background:var(--ink); color:#fff; padding:12px 18px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:1.1rem; margin:0; flex:1; }
+  header input { padding:8px; border:0; border-radius:6px; font-size:.9rem; }
+  main { max-width:1100px; margin:0 auto; padding:18px; }
+  .guard { background:#fffbeb; border:1px solid #fcd34d; color:#7a5901; padding:8px 12px; border-radius:8px; font-size:.85rem; margin-bottom:14px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+  @media (max-width:820px){ .grid{ grid-template-columns:1fr; } }
+  .card { background:#fff; border-radius:10px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .card h2 { margin:0 0 12px; font-size:1.05rem; }
+  label { display:block; font-size:.8rem; color:#374151; margin:8px 0 3px; }
+  input[type=text], select, textarea { width:100%; padding:9px; border:1px solid #d1d5db; border-radius:6px; font-size:.95rem; }
+  .btn { border:0; border-radius:6px; padding:9px 14px; font-weight:700; cursor:pointer; color:#fff; font-size:.9rem; }
+  .btn-green{ background:var(--green); } .btn-blue{ background:var(--blue); } .btn-gray{ background:#374151; }
+  .row { border:1px solid #e5e7eb; border-radius:8px; padding:10px; margin-bottom:8px; }
+  .row .meta { font-size:.78rem; color:#6b7280; display:flex; gap:8px; flex-wrap:wrap; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:99px; font-size:.72rem; font-weight:700; }
+  .s-new{ background:#dbeafe; color:#1e40af; } .s-assigned{ background:#fef3c7; color:#92400e; }
+  .s-contacted{ background:#e9d5ff; color:#6b21a8; } .s-converted{ background:#d1fae5; color:#065f46; }
+  .s-dropped{ background:#f3f4f6; color:#6b7280; } .s-rework{ background:#fed7aa; color:#9a3412; }
+  .row .actions { margin-top:8px; display:flex; gap:6px; flex-wrap:wrap; }
+  .row .actions .btn { padding:6px 10px; font-size:.8rem; }
+  .stat { display:inline-block; background:#f9fafb; border-radius:8px; padding:8px 12px; margin:4px 6px 0 0; font-size:.85rem; }
+  .stat b { font-size:1.1rem; color:var(--green); }
+  .muted { color:#6b7280; font-size:.85rem; }
+  a.link { color:var(--blue); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🛰️ Staffer console</h1>
+  <input id="base" placeholder="Worker URL e.g. https://…workers.dev" size="34" />
+  <input id="token" placeholder="Staff token" type="password" size="18" />
+  <input id="me" placeholder="Your name" size="12" />
+  <button class="btn btn-green" onclick="saveCfg()">Connect</button>
+</header>
+
+<main>
+  <div class="guard">
+    Engage in <b>public</b> where you can. Reference public posts only — no profiling.
+    “Did you vote?” logs only that you followed up, never the answer. Re-work auto-stops after 2 tries.
+  </div>
+
+  <div id="tracker" class="card" style="margin-bottom:18px">
+    <h2>📊 Tracker</h2>
+    <div id="stats" class="muted">Connect to load stats.</div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>➕ Add opportunity (from a public post)</h2>
+      <label>Topic / keyword</label>
+      <input type="text" id="o-topic" placeholder="e.g. FairerShare" />
+      <label>Platform</label>
+      <input type="text" id="o-platform" placeholder="e.g. X, Facebook, forum" />
+      <label>Public post URL</label>
+      <input type="text" id="o-url" placeholder="https://…" />
+      <label>Priority</label>
+      <select id="o-priority"><option value="3">High</option><option value="2" selected>Normal</option><option value="1">Low</option></select>
+      <label>Note (public context only)</label>
+      <textarea id="o-note" rows="2" placeholder="What's the post about / suggested angle"></textarea>
+      <div style="margin-top:10px; display:flex; gap:8px;">
+        <button class="btn btn-green" onclick="addOpp()">Add to queue</button>
+        <button class="btn btn-blue" onclick="claim()">Claim next for me</button>
+        <button class="btn btn-gray" onclick="assignAll()">Round-robin assign all</button>
+      </div>
+      <p class="muted" id="add-msg"></p>
+    </div>
+
+    <div class="card">
+      <h2>📋 Queue
+        <select id="filter" onchange="loadQueue()" style="width:auto; float:right;">
+          <option value="">All</option>
+          <option value="new">New</option>
+          <option value="assigned">Assigned</option>
+          <option value="contacted">Contacted</option>
+          <option value="rework">Re-work</option>
+          <option value="converted">Converted</option>
+          <option value="dropped">Dropped</option>
+        </select>
+      </h2>
+      <label style="display:inline"><input type="checkbox" id="mine" onchange="loadQueue()" style="width:auto"> Only mine</label>
+      <div id="queue" style="margin-top:10px"><p class="muted">Connect to load the queue.</p></div>
+    </div>
+  </div>
+</main>
+
+<script>
+  var cfg = { base:"", token:"", me:"" };
+  try { cfg = JSON.parse(localStorage.getItem("j4n_staff") || "{}"); } catch(e){}
+  cfg.base = cfg.base || ""; cfg.token = cfg.token || ""; cfg.me = cfg.me || "";
+  document.getElementById("base").value = cfg.base;
+  document.getElementById("token").value = cfg.token;
+  document.getElementById("me").value = cfg.me;
+
+  function saveCfg(){
+    cfg.base = document.getElementById("base").value.replace(/\/+$/,"");
+    cfg.token = document.getElementById("token").value.trim();
+    cfg.me = document.getElementById("me").value.trim();
+    localStorage.setItem("j4n_staff", JSON.stringify(cfg));
+    refresh();
+  }
+
+  function api(path, opts){
+    opts = opts || {};
+    opts.headers = Object.assign({ "x-staff-token": cfg.token, "Content-Type":"application/json" }, opts.headers||{});
+    return fetch(cfg.base + path, opts).then(function(r){
+      if(r.status === 401){ throw new Error("Unauthorized — check the staff token"); }
+      return r.json();
+    });
+  }
+
+  function addOpp(){
+    var body = {
+      topic: val("o-topic"), platform: val("o-platform"),
+      postUrl: val("o-url"), priority: val("o-priority"), note: val("o-note")
+    };
+    api("/staff/opportunities", { method:"POST", body: JSON.stringify(body) })
+      .then(function(){ msg("add-msg","Added ✓"); ["o-topic","o-platform","o-url","o-note"].forEach(function(i){document.getElementById(i).value="";}); refresh(); })
+      .catch(function(e){ msg("add-msg", e.message); });
+  }
+  function claim(){
+    if(!cfg.me) return msg("add-msg","Enter your name first.");
+    api("/staff/claim", { method:"POST", body: JSON.stringify({ staffer: cfg.me }) })
+      .then(function(d){ msg("add-msg", d.claimed ? "Claimed: "+(d.claimed.topic||d.claimed.postUrl) : "Queue is empty."); refresh(); })
+      .catch(function(e){ msg("add-msg", e.message); });
+  }
+  function assignAll(){
+    api("/staff/assign", { method:"POST", body:"{}" })
+      .then(function(d){ msg("add-msg", d.error ? d.error : ("Assigned "+d.assigned+" to the roster.")); refresh(); })
+      .catch(function(e){ msg("add-msg", e.message); });
+  }
+
+  function update(id, patch){
+    api("/staff/opportunities/"+id, { method:"POST", body: JSON.stringify(patch) })
+      .then(refresh).catch(function(e){ alert(e.message); });
+  }
+
+  function loadQueue(){
+    if(!cfg.base) return;
+    var q = "/staff/opportunities";
+    var params = [];
+    var f = document.getElementById("filter").value;
+    if(f) params.push("status="+f);
+    if(document.getElementById("mine").checked && cfg.me) params.push("assignedTo="+encodeURIComponent(cfg.me));
+    if(params.length) q += "?"+params.join("&");
+    api(q).then(function(d){ renderQueue(d.opportunities||[]); })
+      .catch(function(e){ document.getElementById("queue").innerHTML='<p class="muted">'+e.message+'</p>'; });
+  }
+
+  function renderQueue(items){
+    var el = document.getElementById("queue");
+    if(!items.length){ el.innerHTML='<p class="muted">Nothing here.</p>'; return; }
+    el.innerHTML = items.map(function(o){
+      var link = o.postUrl ? '<a class="link" href="'+esc(o.postUrl)+'" target="_blank" rel="noopener">post ↗</a>' : '';
+      return '<div class="row">'+
+        '<div><span class="pill s-'+o.status+'">'+o.status+'</span> <b>'+esc(o.topic||"(no topic)")+'</b> '+link+'</div>'+
+        '<div class="meta"><span>P'+o.priority+'</span>'+(o.platform?'<span>'+esc(o.platform)+'</span>':'')+
+          (o.assignedTo?'<span>👤 '+esc(o.assignedTo)+'</span>':'')+(o.outcome?'<span>→ '+o.outcome+'</span>':'')+
+          (o.followedUp?'<span>✅ followed up</span>':'')+'<span>re-work '+o.reworkCount+'/2</span></div>'+
+        (o.note?'<div class="muted" style="margin-top:4px">'+esc(o.note)+'</div>':'')+
+        '<div class="actions">'+
+          btn(o.id,"contacted","Contacted","btn-blue")+
+          conv(o.id)+
+          btn(o.id,"rework","Re-work","btn-gray")+
+          btn(o.id,"dropped","Drop","btn-gray")+
+          followBtn(o.id, o.followedUp)+
+        '</div></div>';
+    }).join("");
+  }
+  function btn(id,status,label,cls){ return '<button class="btn '+cls+'" onclick=\'update("'+id+'",{status:"'+status+'"})\'>'+label+'</button>'; }
+  function conv(id){ return '<button class="btn btn-green" onclick=\'update("'+id+'",{status:"converted",outcome:"pledged"})\'>Converted → pledged</button>'; }
+  function followBtn(id, done){ return done ? "" : '<button class="btn btn-blue" onclick=\'update("'+id+'",{followedUp:true})\'>“Did you vote?” ✓</button>'; }
+
+  function loadStats(){
+    if(!cfg.base) return;
+    api("/staff/stats").then(function(s){
+      var st = s.byStatus||{};
+      var html = stat("Total", s.total||0);
+      ["new","assigned","contacted","converted","rework","dropped"].forEach(function(k){ if(st[k]) html += stat(k, st[k]); });
+      html += stat("Pledged", (s.byOutcome&&s.byOutcome.pledged)||0);
+      html += stat("Followed up", s.followedUp||0);
+      var staffers = Object.keys(s.byStaffer||{});
+      if(staffers.length){
+        html += '<div style="margin-top:10px" class="muted">By staffer: '+staffers.map(function(n){
+          return esc(n)+" ("+s.byStaffer[n].converted+"/"+s.byStaffer[n].assigned+")";
+        }).join(" · ")+'</div>';
+      }
+      document.getElementById("stats").innerHTML = html;
+    }).catch(function(e){ document.getElementById("stats").innerHTML='<p class="muted">'+e.message+'</p>'; });
+  }
+  function stat(label,n){ return '<span class="stat">'+esc(label)+' <b>'+n+'</b></span>'; }
+
+  function refresh(){ loadStats(); loadQueue(); }
+  function val(id){ return document.getElementById(id).value; }
+  function msg(id,t){ document.getElementById(id).textContent = t; }
+  function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+
+  if(cfg.base && cfg.token) refresh();
+</script>
+</body>
+</html>

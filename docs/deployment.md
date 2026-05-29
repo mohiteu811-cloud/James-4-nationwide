@@ -35,6 +35,7 @@ Paste the printed `id` and `preview_id` into `wrangler.toml`.
 ```bash
 npx wrangler secret put MAILERLITE_API_TOKEN   # paste your MailerLite token
 npx wrangler secret put WEBHOOK_SECRET         # a long random string you choose
+npx wrangler secret put STAFF_TOKEN            # a DIFFERENT random string for the staffer console
 ```
 
 Generate a good secret with: `openssl rand -hex 24`
@@ -70,7 +71,26 @@ Cloudflare dashboard.)
 |--------|------------------------------|----------------------------------------------------|
 | POST   | `/webhook?token=…`           | MailerLite confirmation → mint code, credit referrer |
 | GET    | `/referral?email=…`          | Thank-you page → personal link + live count        |
+| GET    | `/leaderboard?code=&limit=`  | Public arcade leaderboard (aliases + caller's rank)|
+| POST   | `/staff/opportunities`       | Staff: add an opportunity (public post)            |
+| GET    | `/staff/opportunities?status=&assignedTo=` | Staff: queue view                    |
+| POST   | `/staff/claim`               | Staff: self-claim next new/rework item             |
+| POST   | `/staff/assign`              | Staff: round-robin assign all new items            |
+| POST   | `/staff/opportunities/:id`   | Staff: update status/outcome/note/follow-up        |
+| GET/POST | `/staff/roster`            | Staff: read/set the on-duty roster                 |
+| GET    | `/staff/stats`               | Staff: tracker aggregates                          |
 | GET    | `/health`                    | Liveness check                                     |
+
+Staff endpoints require the `STAFF_TOKEN` (header `x-staff-token` or `?token=`).
+The leaderboard is public but CORS-locked to `SITE_BASE_URL`.
+
+### Wiring the front-ends
+- **`wordpress/leaderboard.html`** — replace `WORKER_BASE`; paste into a BlockArt block.
+- **`staffer-console/index.html`** — open it (host anywhere static or locally),
+  then enter the worker URL + staff token + your name to connect.
+
+> See `docs/outreach-engine-design.md` for the guardrails the outreach API
+> enforces (capped re-work, no profiling fields, follow-up logs no vote data).
 
 ## Test locally
 

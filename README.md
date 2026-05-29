@@ -19,10 +19,12 @@ data minimisation, and no astroturfing are the product (§6).
 
 | Path                | What it is |
 |---------------------|------------|
-| `referral-worker/`  | **The one custom build:** a Cloudflare Worker that mints referral codes and credits referrers via the MailerLite API. State lives in MailerLite custom fields + a non-PII KV index — no new PII store. |
-| `wordpress/`        | HTML/JS to paste into BlockArt: the **/pledge** page (commitment copy + MailerLite form + `?ref=` capture) and the **thank-you** page (personal link + live count + share buttons). |
+| `referral-worker/`  | **The custom backend:** a Cloudflare Worker that mints referral codes, credits referrers, serves the anonymised leaderboard, and runs the staffer outreach API. State lives in MailerLite custom fields + a non-PII KV index — no new PII store. |
+| `wordpress/`        | HTML/JS to paste into BlockArt: the **/pledge** page (commitment copy + MailerLite form + `?ref=` capture), the **thank-you** page (personal link + live count + share buttons), and the public **leaderboard** (arcade ranks + prize-draw countdown). |
+| `staffer-console/`  | Standalone admin app for on-duty staffers: opportunity queue, round-robin assignment, tracker, and the "Did you vote?" follow-up. Human-driven by design. |
 | `emails/`           | The 5 scheduled **reminder** emails + the **seed broadcast**, copy verbatim from §5, ready to paste into MailerLite. |
-| `docs/`             | `mailerlite-setup.md` (no-code config), `deployment.md` (the worker), `inputs-needed.md` (§8 checklist). |
+| `mockup/`           | Visual mockups: the two screens, the referral-loop journey, and an interactive `demo.html`. |
+| `docs/`             | `mailerlite-setup.md` (no-code config), `deployment.md` (the worker), `outreach-engine-design.md` (agentic-outreach design + guardrails), `inputs-needed.md` (§8 checklist). |
 
 ## Build order (ship incrementally — §7)
 
