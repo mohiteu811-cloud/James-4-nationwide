@@ -1,0 +1,3 @@
+# Copy to `.dev.vars` for local `wrangler dev`. Never commit the real file.
+MAILERLITE_API_TOKEN="your-mailerlite-api-token"
+WEBHOOK_SECRET="a-long-random-string-you-also-put-in-the-webhook-url"

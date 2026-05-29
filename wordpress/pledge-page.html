@@ -1,0 +1,129 @@
+<!--
+  /pledge page — paste into a BlockArt "Custom HTML" block on the WordPress page.
+
+  WHAT YOU MUST DO:
+  1. Replace the <!-- MAILERLITE FORM --> block with your MailerLite embedded
+     form for the Pledgers group (Forms -> Embedded form -> copy the HTML).
+  2. In MailerLite, add a HIDDEN field to that form mapped to the custom field
+     `referred_by`. Its <input> will be named  fields[referred_by]  — the script
+     at the bottom finds it automatically. If you cannot add a hidden field in
+     the builder, the script creates one for you.
+  3. Keep double opt-in ON for the Pledgers group (Build Brief §6).
+
+  Accessibility: large tap targets, high-contrast text, AA colour contrast —
+  the audience skews older (§7.6).
+-->
+<style>
+  .j4n-pledge {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 1.25rem;
+    font-size: 1.125rem;
+    line-height: 1.6;
+    color: #111827;
+  }
+  .j4n-pledge h1 {
+    font-size: clamp(1.9rem, 5vw, 2.6rem);
+    line-height: 1.15;
+    margin: 0 0 0.75rem;
+  }
+  .j4n-pledge .j4n-sub {
+    font-size: 1.2rem;
+    margin: 0 0 1.5rem;
+  }
+  .j4n-trigger {
+    font-weight: 700;
+    font-size: 1.25rem;
+    background: #fff3cd;
+    border-left: 6px solid #b8860b;
+    padding: 0.9rem 1.1rem;
+    margin: 1.5rem 0;
+    border-radius: 6px;
+  }
+  .j4n-form-wrap {
+    margin: 1.5rem 0;
+  }
+  /* Make any MailerLite button/input inside this page big and tappable. */
+  .j4n-pledge input[type="email"],
+  .j4n-pledge input[type="text"],
+  .j4n-pledge button,
+  .j4n-pledge .ml-form-embedSubmit button {
+    min-height: 52px;
+    font-size: 1.125rem;
+  }
+  .j4n-fineprint {
+    font-size: 0.95rem;
+    color: #374151;
+    margin-top: 1rem;
+  }
+</style>
+
+<section class="j4n-pledge">
+  <h1>Pledge to vote.</h1>
+  <p class="j4n-sub">
+    There's a real choice on this year's Nationwide ballot — but the form is
+    built to hide it. Pledge now and we'll send you one reminder the day your
+    ballot lands. No spam, just the nudge to vote.
+  </p>
+
+  <p class="j4n-trigger">
+    Don't Quick Vote. Scroll down. Vote FOR Sherwin-Smith.
+  </p>
+
+  <div class="j4n-form-wrap">
+    <!-- ============================================================== -->
+    <!-- MAILERLITE FORM: paste your embedded Pledgers form HTML here.  -->
+    <!-- It must include an email field and a hidden `referred_by`      -->
+    <!-- field (input name: fields[referred_by]).                       -->
+    <!-- ============================================================== -->
+    <!-- MAILERLITE FORM -->
+  </div>
+
+  <p class="j4n-fineprint">
+    Double opt-in: you'll get one email to confirm. We only ever use your email
+    to remind you to vote. You can unsubscribe at any time.
+  </p>
+</section>
+
+<script>
+  (function () {
+    // Capture ?ref=CODE and remember it across the double opt-in journey.
+    var KEY = "j4n_ref";
+    try {
+      var params = new URLSearchParams(window.location.search);
+      var ref = params.get("ref");
+      if (ref) {
+        ref = ref.trim().slice(0, 16);
+        if (ref) localStorage.setItem(KEY, ref);
+      }
+    } catch (e) {}
+
+    var ref = null;
+    try { ref = localStorage.getItem(KEY); } catch (e) {}
+    if (!ref) return;
+
+    // Inject the referral code into the MailerLite form's referred_by field.
+    function inject() {
+      var forms = document.querySelectorAll(".j4n-form-wrap form");
+      forms.forEach(function (form) {
+        var input = form.querySelector('[name="fields[referred_by]"]');
+        if (!input) {
+          input = document.createElement("input");
+          input.type = "hidden";
+          input.name = "fields[referred_by]";
+          form.appendChild(input);
+        }
+        input.value = ref;
+      });
+    }
+
+    if (document.readyState !== "loading") inject();
+    else document.addEventListener("DOMContentLoaded", inject);
+    // MailerLite injects its form asynchronously; re-run a few times to be safe.
+    var tries = 0;
+    var iv = setInterval(function () {
+      inject();
+      if (++tries > 20) clearInterval(iv);
+    }, 300);
+  })();
+</script>
