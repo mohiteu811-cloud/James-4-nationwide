@@ -20,6 +20,9 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Opt-in: only runs if you set repo variable ENABLE_CF_DEPLOY = true.
+    # Leave it unset if you deploy via Cloudflare's own Git integration (web UI).
+    if: ${{ vars.ENABLE_CF_DEPLOY == 'true' }}
     steps:
       - uses: actions/checkout@v4
 

@@ -37,13 +37,10 @@ data minimisation, and no astroturfing are the product (§6).
 
 ## Deploy
 
-The worker runs on **Cloudflare** (Workers + Durable Objects — free plan is enough; it does not run on Railway/Vercel). One command does it:
+The worker runs on **Cloudflare** (Workers + Durable Objects — free plan is enough; it does not run on Railway/Vercel).
 
-```bash
-./deploy.sh --console   # worker + staffer console (Cloudflare Pages)
-```
-
-Then follow `docs/deploy-checklist.md` to wire up the MailerLite webhook and paste `WORKER_BASE` into the WordPress pages. Manual steps are in `docs/deployment.md`.
+- **No terminal? →** `docs/setup-no-terminal.md` — deploy entirely from the Cloudflare + GitHub web dashboards.
+- **Command line →** `./deploy.sh --console` (worker + staffer console), then `docs/deploy-checklist.md` to wire up the webhook and paste `WORKER_BASE` into the WordPress pages. Manual CLI steps: `docs/deployment.md`.
 
 ## The canonical line — on every email and share
 
