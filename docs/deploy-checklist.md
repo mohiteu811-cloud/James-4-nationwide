@@ -55,3 +55,19 @@ the staffer console to Cloudflare Pages.
 - [ ] Map a route like `api.james4nationwide.co.uk` to the worker (Cloudflare
       dashboard → Workers → your worker → Triggers/Routes), then use that as
       `WORKER_BASE` everywhere.
+
+## Optional: auto-deploy from GitHub (CI)
+Pushes to `main` can deploy automatically via the workflows in
+`.github/workflows/` (worker + Pages console). One-time setup:
+
+- [ ] Create a Cloudflare API token (dashboard → My Profile → API Tokens) with
+      **Edit Cloudflare Workers** and **Cloudflare Pages: Edit** permissions.
+- [ ] In GitHub → Settings → Secrets and variables → Actions, add:
+      `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+- [ ] Do the **first** deploy with `./deploy.sh` so the three worker secrets
+      (`MAILERLITE_API_TOKEN`, `WEBHOOK_SECRET`, `STAFF_TOKEN`) exist on
+      Cloudflare. CI redeploys reuse them — it never needs them.
+
+After that, the worker workflow runs (with tests) whenever `referral-worker/**`
+changes on `main`, and the console workflow whenever `staffer-console/**` does.
+Both can also be triggered manually from the Actions tab.

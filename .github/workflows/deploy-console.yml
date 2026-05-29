@@ -1,0 +1,26 @@
+name: Deploy staffer console
+
+# Auto-deploys the staffer console to Cloudflare Pages on pushes to main that
+# touch it. Uses the same CLOUDFLARE_API_TOKEN (needs "Cloudflare Pages: Edit")
+# and CLOUDFLARE_ACCOUNT_ID repo secrets as the worker workflow.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "staffer-console/**"
+      - ".github/workflows/deploy-console.yml"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy staffer-console --project-name=james4nationwide-console --branch=main --commit-dirty=true
