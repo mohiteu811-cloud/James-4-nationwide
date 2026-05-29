@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 720" font-family="-apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <rect width="480" height="720" fill="#f3f4f6"/>
+  <text x="240" y="36" text-anchor="middle" font-size="20" font-weight="700" fill="#111827">Public leaderboard — arcade "high scores"</text>
+
+  <!-- card -->
+  <rect x="40" y="58" width="400" height="630" rx="16" fill="#ffffff" stroke="#e5e7eb" stroke-width="2"/>
+
+  <text x="240" y="98" text-anchor="middle" font-size="22" font-weight="700" fill="#111827">🏆 Top recruiters</text>
+  <text x="240" y="120" text-anchor="middle" font-size="12" fill="#374151">Members bringing the most voters to the ballot.</text>
+  <text x="240" y="136" text-anchor="middle" font-size="12" fill="#374151">Share your link to climb.</text>
+
+  <!-- countdown -->
+  <rect x="64" y="152" width="352" height="40" rx="8" fill="#111827"/>
+  <text x="240" y="178" text-anchor="middle" font-size="15" font-weight="700" fill="#fbbf24" letter-spacing="1">⏳ Next prize draw in 04:12:37</text>
+
+  <!-- rows -->
+  <!-- rank 1 gold -->
+  <rect x="64" y="206" width="352" height="46" rx="8" fill="#fef3c7"/>
+  <text x="84" y="235" font-size="20" font-weight="800" fill="#0b6e4f">1</text>
+  <text x="116" y="235" font-size="15" font-weight="700" fill="#111827">🥇 Mighty Falcon</text>
+  <text x="398" y="235" text-anchor="end" font-size="17" font-weight="800" fill="#0b6e4f">42</text>
+
+  <!-- rank 2 silver -->
+  <rect x="64" y="258" width="352" height="46" rx="8" fill="#f1f5f9"/>
+  <text x="84" y="287" font-size="20" font-weight="800" fill="#0b6e4f">2</text>
+  <text x="116" y="287" font-size="15" font-weight="700" fill="#111827">🥈 Swift Otter</text>
+  <text x="398" y="287" text-anchor="end" font-size="17" font-weight="800" fill="#0b6e4f">38</text>
+
+  <!-- rank 3 bronze -->
+  <rect x="64" y="310" width="352" height="46" rx="8" fill="#fdf2e9"/>
+  <text x="84" y="339" font-size="20" font-weight="800" fill="#0b6e4f">3</text>
+  <text x="116" y="339" font-size="15" font-weight="700" fill="#111827">🥉 Brave Heron</text>
+  <text x="398" y="339" text-anchor="end" font-size="17" font-weight="800" fill="#0b6e4f">29</text>
+
+  <!-- ranks 4-6 plain -->
+  <g>
+    <rect x="64" y="362" width="352" height="42" rx="8" fill="#f9fafb"/>
+    <text x="84" y="389" font-size="17" font-weight="800" fill="#0b6e4f">4</text>
+    <text x="116" y="389" font-size="14" font-weight="600" fill="#111827">Keen Lynx</text>
+    <text x="398" y="389" text-anchor="end" font-size="15" font-weight="800" fill="#0b6e4f">21</text>
+
+    <rect x="64" y="410" width="352" height="42" rx="8" fill="#f9fafb"/>
+    <text x="84" y="437" font-size="17" font-weight="800" fill="#0b6e4f">5</text>
+    <text x="116" y="437" font-size="14" font-weight="600" fill="#111827">Royal Wren</text>
+    <text x="398" y="437" text-anchor="end" font-size="15" font-weight="800" fill="#0b6e4f">17</text>
+
+    <rect x="64" y="458" width="352" height="42" rx="8" fill="#f9fafb"/>
+    <text x="84" y="485" font-size="17" font-weight="800" fill="#0b6e4f">6</text>
+    <text x="116" y="485" font-size="14" font-weight="600" fill="#111827">Sunny Fox</text>
+    <text x="398" y="485" text-anchor="end" font-size="15" font-weight="800" fill="#0b6e4f">14</text>
+  </g>
+
+  <text x="240" y="528" text-anchor="middle" font-size="12" fill="#9ca3af">· · ·</text>
+
+  <!-- you row -->
+  <rect x="64" y="540" width="352" height="46" rx="8" fill="#eef2ff" stroke="#1d4ed8" stroke-width="2" stroke-dasharray="5 3"/>
+  <text x="84" y="569" font-size="16" font-weight="800" fill="#1d4ed8">#7</text>
+  <text x="118" y="569" font-size="14" font-weight="700" fill="#1d4ed8">You — Lucky Stag</text>
+  <text x="398" y="569" text-anchor="end" font-size="16" font-weight="800" fill="#1d4ed8">11</text>
+
+  <!-- footer -->
+  <text x="240" y="624" text-anchor="middle" font-size="10.5" fill="#6b7280">Anonymised — aliases only, no names or emails.</text>
+  <text x="240" y="642" text-anchor="middle" font-size="10.5" fill="#6b7280">Ranks count referrals, not votes.</text>
+  <text x="240" y="660" text-anchor="middle" font-size="10.5" font-weight="700" fill="#7a5901">Prize-draw entries are earned by sharing your link.</text>
+</svg>
