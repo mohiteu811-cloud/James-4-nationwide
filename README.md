@@ -35,6 +35,16 @@ data minimisation, and no astroturfing are the product (§6).
 5. **Activate the existing list** — send `emails/0-seed-broadcast.md` to current Weekly/Daily subscribers (the pyramid's seed layer).
 6. **Polish** — accessibility (WCAG AA, large tap targets, high contrast), Pixel retargeting, source tagging.
 
+## Deploy
+
+The worker runs on **Cloudflare** (Workers + Durable Objects — free plan is enough; it does not run on Railway/Vercel). One command does it:
+
+```bash
+./deploy.sh --console   # worker + staffer console (Cloudflare Pages)
+```
+
+Then follow `docs/deploy-checklist.md` to wire up the MailerLite webhook and paste `WORKER_BASE` into the WordPress pages. Manual steps are in `docs/deployment.md`.
+
 ## The canonical line — on every email and share
 
 > **Don't Quick Vote. Scroll down. Vote FOR Sherwin-Smith.**
