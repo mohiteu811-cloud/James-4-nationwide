@@ -88,26 +88,40 @@
       document.getElementById("j4n-share").hidden = false;
     }
 
-    var email = emailFromUrl();
-    if (email) {
+    var FALLBACK = "Confirm your email and your link will appear here.";
+
+    // The MailerLite redirect can reach this page before the subscriber is
+    // visible to the API (the worker returns 202 "pending" then). Poll a few
+    // times with backoff so the link appears as soon as it's ready.
+    function loadLink(email, attempt) {
+      attempt = attempt || 0;
       fetch(WORKER_BASE + "/referral?email=" + encodeURIComponent(email))
-        .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+        .then(function (r) {
+          if (r.status === 202) return { _pending: true };
+          return r.ok ? r.json() : Promise.reject();
+        })
         .then(function (data) {
           if (data && data.referral_link) {
             render(data.referral_link, data.referral_count);
+          } else if ((data && data._pending) || (data && data.status === "pending")) {
+            if (attempt < 8) {
+              setTimeout(function () { loadLink(email, attempt + 1); }, 2000);
+            } else {
+              document.getElementById("j4n-link").value = FALLBACK;
+            }
           } else {
-            document.getElementById("j4n-link").value =
-              "Confirm your email and your link will appear here.";
+            document.getElementById("j4n-link").value = FALLBACK;
           }
         })
         .catch(function () {
-          document.getElementById("j4n-link").value =
-            "Confirm your email and your link will appear here.";
+          if (attempt < 4) setTimeout(function () { loadLink(email, attempt + 1); }, 2500);
+          else document.getElementById("j4n-link").value = FALLBACK;
         });
-    } else {
-      document.getElementById("j4n-link").value =
-        "Confirm your email and your link will appear here.";
     }
+
+    var email = emailFromUrl();
+    if (email) loadLink(email, 0);
+    else document.getElementById("j4n-link").value = FALLBACK;
 
     document.getElementById("j4n-copy").addEventListener("click", function () {
       var input = document.getElementById("j4n-link");

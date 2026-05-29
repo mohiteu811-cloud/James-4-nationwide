@@ -17,18 +17,18 @@ npm install
 npx wrangler login
 ```
 
-## 2. Create the KV namespace
+## 2. Storage (Durable Objects — nothing to create)
 
-This is the only storage outside MailerLite. It holds **no PII** — just an
-opaque `referral_code → subscriber-id` index so we can credit referrers without
-scanning the list (§6).
+State lives in two **Durable Objects** (`ReferralLedger`, `OutreachQueue`),
+declared in `wrangler.toml`. They are strongly consistent and single-threaded,
+so referral counts and the outreach queue update **atomically** — no
+lost-update or eventual-consistency races. The migration in `wrangler.toml`
+creates them automatically on first `deploy`; there is no namespace to
+provision by hand.
 
-```bash
-npx wrangler kv namespace create REFERRALS
-npx wrangler kv namespace create REFERRALS --preview
-```
-
-Paste the printed `id` and `preview_id` into `wrangler.toml`.
+They hold **no extra PII**: opaque referral codes + counts, and references to
+**public** posts only (§6). SQLite-backed Durable Objects are available on the
+Workers Free plan.
 
 ## 3. Set secrets
 
@@ -43,8 +43,11 @@ Generate a good secret with: `openssl rand -hex 24`
 ## 4. (Optional) set the site origin
 
 `SITE_BASE_URL` in `wrangler.toml` defaults to `https://james4nationwide.co.uk`.
-It is used to build share links and to lock CORS so only the live thank-you page
-can read the `/referral` endpoint. Change it only if the domain differs.
+It is used to build share links and to lock CORS on the public endpoints
+(`/referral`, `/leaderboard`). Change it only if the domain differs. The
+`/staff/*` endpoints reflect the request origin instead (they are
+token-authenticated and credential-less), so the staffer console works whether
+it is hosted elsewhere or opened locally.
 
 ## 5. Deploy
 
@@ -97,15 +100,30 @@ The leaderboard is public but CORS-locked to `SITE_BASE_URL`.
 ```bash
 cp .dev.vars.example .dev.vars   # fill in values
 npm run dev                      # wrangler dev
-npm test                         # runs the unit tests against an in-memory MailerLite + KV
+npm test                         # 13 tests against an in-memory MailerLite + Durable Objects
 ```
 
 ## How it behaves (and why)
 
-- **Idempotent:** `pledged_at` is stamped only after a subscriber is fully
-  processed (code minted + referrer credited). Re-delivered webhooks are no-ops.
+- **Atomic + exactly-once:** crediting runs inside the `ReferralLedger` Durable
+  Object, keyed on the new subscriber's id. Concurrent confirmations can't lose
+  a credit, and duplicate or self-triggered `subscriber.updated` webhooks are
+  no-ops. A failed MailerLite mirror write can never double-count (the ledger is
+  authoritative; MailerLite fields are a best-effort display mirror).
 - **Double-opt-in safe:** referrers are credited only when the new subscriber's
   status is `active` — unconfirmed signups never inflate a count.
-- **Instant link:** `/referral` lazily mints a code so the supporter's link
-  works on the thank-you page even before they confirm — without sealing
-  `pledged_at`, so the webhook still credits their referrer later.
+- **Instant, lag-free link:** `/referral` lazily mints a code in the DO
+  (strongly consistent, so a just-minted referrer code is immediately creditable
+  with no KV propagation delay). Lazy mint does not seal idempotency, so the
+  webhook still credits the referrer on confirmation.
+- **Single-winner queue:** opportunity creation and claims are serialised in the
+  `OutreachQueue` DO — no clobbered index, no two staffers on one item.
+- **Privacy:** `/referral` is rate-limited and returns the same `pending`
+  response for unknown and not-yet-visible emails, so it isn't a clean
+  pledged/not-pledged oracle.
+
+### Migrating existing pledgers (optional)
+If anyone already has a `referral_code` in MailerLite from before the ledger
+existed, register it so their shared links keep crediting:
+`POST` to the `ReferralLedger` `register` action with `{ subscriberId, code, count }`.
+New pledgers need nothing — their code is minted on first confirmation.

@@ -19,7 +19,7 @@ data minimisation, and no astroturfing are the product (§6).
 
 | Path                | What it is |
 |---------------------|------------|
-| `referral-worker/`  | **The custom backend:** a Cloudflare Worker that mints referral codes, credits referrers, serves the anonymised leaderboard, and runs the staffer outreach API. State lives in MailerLite custom fields + a non-PII KV index — no new PII store. |
+| `referral-worker/`  | **The custom backend:** a Cloudflare Worker that mints referral codes, credits referrers, serves the anonymised leaderboard, and runs the staffer outreach API. State lives in two strongly-consistent Durable Objects (opaque codes + counts, public-post references) with MailerLite custom fields mirroring counts — no new PII store. |
 | `wordpress/`        | HTML/JS to paste into BlockArt: the **/pledge** page (commitment copy + MailerLite form + `?ref=` capture), the **thank-you** page (personal link + live count + share buttons), and the public **leaderboard** (arcade ranks + prize-draw countdown). |
 | `staffer-console/`  | Standalone admin app for on-duty staffers: opportunity queue, round-robin assignment, tracker, and the "Did you vote?" follow-up. Human-driven by design. |
 | `emails/`           | The 5 scheduled **reminder** emails + the **seed broadcast**, copy verbatim from §5, ready to paste into MailerLite. |

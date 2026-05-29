@@ -2,23 +2,30 @@ name = "james4nationwide-referrals"
 main = "src/index.js"
 compatibility_date = "2024-11-01"
 
-# Tiny, non-PII index: maps a public referral_code -> MailerLite subscriber id.
-# This is the only storage outside MailerLite. It holds no email, no name, no
-# membership data — just an opaque code and an internal id. (Build Brief §6)
-#
-# Create it once, then paste the printed id below:
-#   npx wrangler kv namespace create REFERRALS
-#   npx wrangler kv namespace create REFERRALS --preview
-[[kv_namespaces]]
-binding = "REFERRALS"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
-preview_id = "REPLACE_WITH_PREVIEW_KV_NAMESPACE_ID"
+# State lives in two Durable Objects (strongly consistent — atomic counts and an
+# atomic outreach queue, so there are no lost-update or read-modify-write races).
+# They hold no extra PII: opaque referral codes + counts, and references to
+# PUBLIC posts only. (Build Brief §6 / docs/outreach-engine-design.md)
+[[durable_objects.bindings]]
+name = "REFERRAL_LEDGER"
+class_name = "ReferralLedger"
+
+[[durable_objects.bindings]]
+name = "OUTREACH_QUEUE"
+class_name = "OutreachQueue"
+
+# SQLite-backed Durable Objects are available on the Workers Free plan.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ReferralLedger", "OutreachQueue"]
 
 [vars]
-# Public site origin. Used to build share links and to lock down CORS so only
-# the thank-you page on the live site can read the referral endpoint.
+# Public site origin. Used to build share links and to lock CORS on the public
+# endpoints. Staff endpoints reflect the request origin (they are token-authed),
+# so the staffer console can run from anywhere.
 SITE_BASE_URL = "https://james4nationwide.co.uk"
 
 # Secrets (DO NOT put these here — set them with `wrangler secret put`):
 #   MAILERLITE_API_TOKEN   MailerLite -> Integrations -> API (needs API access)
 #   WEBHOOK_SECRET         shared token appended to the webhook URL (?token=...)
+#   STAFF_TOKEN            shared token for the staffer console (X-Staff-Token)

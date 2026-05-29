@@ -2,18 +2,19 @@
  * James4Nationwide — "Pledge & Remind" referral + outreach function.
  *
  * The custom-engineered backend for the campaign (Build Brief §4 + the outreach
- * engine in docs/outreach-engine-design.md). State lives in MailerLite custom
- * fields plus a single Cloudflare KV namespace (no extra PII store): a
- * code -> subscriber-id index, an anonymised leaderboard, and the staffer
- * outreach queue (which references public posts, not private profiles).
+ * engine in docs/outreach-engine-design.md).
  *
- * Responsibilities:
- *   1. POST /webhook      — MailerLite confirmation: mint code, credit referrer.
- *   2. GET  /referral     — thank-you page: personal link + live count.
- *   3. GET  /leaderboard  — public arcade leaderboard (aliases, not identities).
- *   4. /staff/*           — staffer console API (round-robin queue + tracker).
+ * State lives in two Cloudflare Durable Objects (strongly consistent, single-
+ * threaded — so counts and the queue update atomically, with no lost-update or
+ * eventual-consistency races):
+ *   - ReferralLedger : code index, referral counts, leaderboard, exactly-once
+ *                      idempotency. Authoritative; MailerLite custom fields are
+ *                      a best-effort mirror for display/segmentation.
+ *   - OutreachQueue  : the staffer opportunity queue, roster and rotation.
  *
- * No individual vote tracking. No member-register data. Minimal PII. (§6)
+ * No new PII store: the ledger holds opaque codes + counts; the queue holds
+ * references to *public* posts, never private profiles. No individual vote
+ * tracking. Minimal PII. (Build Brief §6)
  */
 
 const ML_API = "https://connect.mailerlite.com/api";
@@ -26,27 +27,36 @@ const OPP_STATUSES = ["new", "assigned", "contacted", "converted", "dropped", "r
 const OPP_OUTCOMES = ["pledged", "subscribed", "followed", "none"];
 const MAX_REWORK = 2; // guardrail: cap re-attempts so re-work never becomes spam
 
+// /referral is a public, email-keyed endpoint, so rate-limit it to make
+// enumeration impractical (Codex review #7 mitigation).
+const RATE_WINDOW_MS = 10 * 60 * 1000;
+const RATE_MAX = 30;
+
+/* ========================================================================== */
+/* Worker (router)                                                            */
+/* ========================================================================== */
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const { pathname } = url;
 
     if (request.method === "OPTIONS") {
-      return cors(env, new Response(null, { status: 204 }));
+      return applyCors(env, request, new Response(null, { status: 204 }));
     }
 
     try {
       if (pathname === "/webhook" && request.method === "POST") {
-        return await handleWebhook(request, env);
+        return await handleWebhook(request, env); // server-to-server, no CORS
       }
       if (pathname === "/referral" && request.method === "GET") {
-        return cors(env, await handleReferralLookup(url, env));
+        return applyCors(env, request, await handleReferralLookup(request, url, env));
       }
       if (pathname === "/leaderboard" && request.method === "GET") {
-        return cors(env, await handleLeaderboard(url, env));
+        return applyCors(env, request, await handleLeaderboard(url, env));
       }
       if (pathname.startsWith("/staff/")) {
-        return cors(env, await handleStaff(request, url, env));
+        return applyCors(env, request, await handleStaff(request, url, env));
       }
       if (pathname === "/health") {
         return json({ ok: true });
@@ -74,18 +84,15 @@ async function handleWebhook(request, env) {
   const payload = await request.json().catch(() => null);
   if (!payload) return json({ error: "bad_request" }, 400);
 
-  // MailerLite batches events under `events`; fall back to a single event body.
   const events = Array.isArray(payload.events) ? payload.events : [payload];
 
   const results = [];
   for (const event of events) {
     const subscriber = extractSubscriber(event);
     if (!subscriber || !subscriber.id) continue;
-
-    // Only act on confirmed/active subscribers — this is what enforces the
-    // double-opt-in red line: unconfirmed referrals are never credited.
+    // Only act on confirmed/active subscribers — enforces the double-opt-in
+    // red line: unconfirmed referrals are never credited.
     if (subscriber.status && subscriber.status !== "active") continue;
-
     results.push(await processConfirmedSubscriber(subscriber.id, env));
   }
 
@@ -93,90 +100,493 @@ async function handleWebhook(request, env) {
 }
 
 /**
- * Idempotent confirmation handler. `pledged_at` doubles as the "fully
- * processed" marker: once it is set we have already minted a code and credited
- * any referrer, so re-deliveries are no-ops.
+ * Crediting is now atomic and exactly-once in the ledger DO (keyed on the new
+ * subscriber's id), so duplicate or self-triggered `subscriber.updated`
+ * webhooks are no-ops and a failed MailerLite mirror write can never cause a
+ * double credit (Codex review #1, #2, #3).
  */
 async function processConfirmedSubscriber(subscriberId, env) {
   const sub = await mlGetSubscriber(env, subscriberId);
   if (!sub) return { id: subscriberId, skipped: "not_found" };
 
   const fields = sub.fields || {};
-  if (fields.pledged_at) {
-    return { id: subscriberId, skipped: "already_processed" };
-  }
-
-  // 1. Ensure this subscriber has their own referral code.
-  const code = fields.referral_code || (await mintCode(env, sub.id));
-
-  // 2. Credit the referrer, if any.
-  let credited = null;
-  const referredBy = (fields.referred_by || "").trim();
-  if (referredBy) {
-    credited = await creditReferrer(env, referredBy);
-  }
-
-  // 3. Stamp pledged_at last — this seals the idempotency gate.
-  await mlUpdateSubscriber(env, sub.id, {
-    referral_code: code,
-    pledged_at: today(),
+  const { data: result } = await callDO(ledgerStub(env), "credit", {
+    subscriberId: sub.id,
+    referredBy: (fields.referred_by || "").trim(),
+    preferCode: fields.referral_code || "",
   });
 
-  return { id: subscriberId, code, credited };
-}
+  // Mirror to MailerLite for display/segmentation. Best-effort: the ledger is
+  // authoritative, so a failure here never loses or double-counts anything.
+  await safe(() =>
+    mlUpdateSubscriber(env, sub.id, {
+      referral_code: result.code,
+      pledged_at: today(),
+    })
+  );
+  if (result.credited && result.credited.subscriberId && result.credited.referral_count != null) {
+    await safe(() =>
+      mlUpdateSubscriber(env, result.credited.subscriberId, {
+        referral_count: result.credited.referral_count,
+      })
+    );
+  }
 
-async function creditReferrer(env, referralCode) {
-  const referrerId = await env.REFERRALS.get(`code:${referralCode}`);
-  if (!referrerId) return { code: referralCode, found: false };
-
-  const referrer = await mlGetSubscriber(env, referrerId);
-  if (!referrer) return { code: referralCode, found: false };
-
-  const current = parseInt((referrer.fields || {}).referral_count, 10);
-  const next = (Number.isFinite(current) ? current : 0) + 1;
-
-  await mlUpdateSubscriber(env, referrer.id, { referral_count: next });
-  await updateLeaderboard(env, referralCode, next);
-  return { code: referralCode, found: true, referral_count: next };
+  return { id: subscriberId, ...result };
 }
 
 /* -------------------------------------------------------------------------- */
 /* Read endpoint: thank-you page link + live count                            */
 /* -------------------------------------------------------------------------- */
 
-async function handleReferralLookup(url, env) {
+async function handleReferralLookup(request, url, env) {
+  const ip = request.headers.get("cf-connecting-ip") || "unknown";
+  const { data: rate } = await callDO(ledgerStub(env), "rate", { ip });
+  if (!rate.allowed) {
+    return json({ error: "rate_limited" }, 429, { "Retry-After": String(rate.retryAfter || 60) });
+  }
+
   const email = (url.searchParams.get("email") || "").trim().toLowerCase();
   if (!email || !email.includes("@")) {
     return json({ error: "email_required" }, 400);
   }
 
   const sub = await mlGetSubscriber(env, email);
-  if (!sub) {
-    // Subscriber not visible yet (form just submitted). Return a friendly
-    // "pending" so the thank-you page can poll or show a fallback.
-    return json({ status: "pending" }, 202);
-  }
+  // Collapse "not a subscriber" into the same "pending" response as
+  // "just submitted, not visible yet" so the endpoint isn't a clean
+  // pledged/not-pledged oracle, and so the page polls in both cases.
+  if (!sub) return json({ status: "pending" }, 202);
 
-  const fields = sub.fields || {};
-  // Lazy-mint so the personal link works the instant they hit thank-you,
-  // before the confirmation webhook has run. We do NOT set pledged_at here,
-  // so the webhook still credits the referrer on confirmation.
-  const code = fields.referral_code || (await mintCode(env, sub.id));
+  // Lazy-mint (atomic in the DO) so the personal link works the instant they
+  // hit thank-you, before the confirmation webhook runs. This does NOT seal
+  // idempotency, so the webhook still credits the referrer on confirmation.
+  const { data } = await callDO(ledgerStub(env), "ensureCode", {
+    subscriberId: sub.id,
+    preferCode: (sub.fields || {}).referral_code || "",
+  });
 
-  const count = parseInt(fields.referral_count, 10);
   return json({
     status: sub.status === "active" ? "confirmed" : "pending_confirmation",
-    referral_code: code,
-    referral_count: Number.isFinite(count) ? count : 0,
-    referral_link: `${shareBase(env)}/pledge/?ref=${code}`,
+    referral_code: data.code,
+    referral_count: data.count,
+    referral_link: `${shareBase(env)}/pledge/?ref=${data.code}`,
   });
 }
 
+async function handleLeaderboard(url, env) {
+  const limit = clamp(parseInt(url.searchParams.get("limit"), 10) || 20, 1, 50);
+  const code = (url.searchParams.get("code") || "").trim();
+  const { data } = await callDO(ledgerStub(env), "leaderboard", { limit, code });
+  return json(data);
+}
+
 /* -------------------------------------------------------------------------- */
-/* Leaderboard (anonymised, arcade-style)                                     */
+/* Staffer console / outreach queue (staff-only) — forwarded to the DO        */
 /* -------------------------------------------------------------------------- */
 
-// Generated alias keeps the board fun and identity-free (Build Brief §6).
+async function handleStaff(request, url, env) {
+  if (!verifyToken(request, env.STAFF_TOKEN)) {
+    return json({ error: "unauthorized" }, 401);
+  }
+
+  const path = url.pathname.replace(/\/+$/, "");
+  const method = request.method;
+  const stub = queueStub(env);
+
+  if (path === "/staff/opportunities" && method === "GET") {
+    return forwardDO(stub, "list", {
+      status: url.searchParams.get("status"),
+      assignedTo: url.searchParams.get("assignedTo"),
+    });
+  }
+  if (path === "/staff/opportunities" && method === "POST") {
+    return forwardDO(stub, "create", await readBody(request));
+  }
+  const idMatch = path.match(/^\/staff\/opportunities\/([\w-]+)$/);
+  if (idMatch && (method === "POST" || method === "PATCH")) {
+    return forwardDO(stub, "update", { id: idMatch[1], patch: await readBody(request) });
+  }
+  if (path === "/staff/claim" && method === "POST") {
+    return forwardDO(stub, "claim", await readBody(request));
+  }
+  if (path === "/staff/assign" && method === "POST") {
+    return forwardDO(stub, "assign", await readBody(request));
+  }
+  if (path === "/staff/roster" && method === "GET") {
+    return forwardDO(stub, "rosterGet", {});
+  }
+  if (path === "/staff/roster" && method === "POST") {
+    return forwardDO(stub, "rosterSet", await readBody(request));
+  }
+  if (path === "/staff/stats" && method === "GET") {
+    return forwardDO(stub, "stats", {});
+  }
+  return json({ error: "not_found" }, 404);
+}
+
+async function forwardDO(stub, action, payload) {
+  const { status, data } = await callDO(stub, action, payload);
+  return json(data, status);
+}
+
+/* ========================================================================== */
+/* Durable Object: ReferralLedger                                             */
+/* ========================================================================== */
+
+export class ReferralLedger {
+  constructor(state, env) {
+    this.storage = state.storage;
+    this.env = env;
+  }
+
+  async fetch(request) {
+    const action = new URL(request.url).pathname.replace(/^\//, "");
+    const body = await request.json().catch(() => ({}));
+    try {
+      switch (action) {
+        case "ensureCode": {
+          const code = await this._ensureCode(body.subscriberId, body.preferCode);
+          return json({ code, count: await this._count(code) });
+        }
+        case "credit":
+          return json(await this._credit(body));
+        case "register":
+          return json(await this._register(body));
+        case "leaderboard":
+          return json(await this._leaderboard(body.limit, body.code));
+        case "rate":
+          return json(await this._rate(body.ip));
+        default:
+          return json({ error: "unknown_action" }, 400);
+      }
+    } catch (err) {
+      console.error("ledger", err && err.stack ? err.stack : err);
+      return json({ error: "ledger_error" }, 500);
+    }
+  }
+
+  async _ensureCode(subscriberId, preferCode) {
+    const subKey = `sub:${subscriberId}`;
+    const existing = await this.storage.get(subKey);
+    if (existing) return existing;
+
+    // Reuse a code already minted in MailerLite (e.g. migrated/seed subscribers)
+    // so the ledger and MailerLite stay consistent.
+    if (preferCode && !(await this.storage.get(`code:${preferCode}`))) {
+      await this.storage.put(`code:${preferCode}`, String(subscriberId));
+      await this.storage.put(subKey, preferCode);
+      return preferCode;
+    }
+    for (let i = 0; i < 6; i++) {
+      const code = randomCode();
+      if (await this.storage.get(`code:${code}`)) continue; // collision
+      await this.storage.put(`code:${code}`, String(subscriberId));
+      await this.storage.put(subKey, code);
+      return code;
+    }
+    throw new Error("could not mint a unique referral code");
+  }
+
+  async _credit({ subscriberId, referredBy, preferCode }) {
+    const doneKey = `done:${subscriberId}`;
+    const code = await this._ensureCode(subscriberId, preferCode);
+
+    // Exactly-once: if we've already processed this confirmation, do not credit
+    // again (handles webhook retries + self-triggered subscriber.updated).
+    if (await this.storage.get(doneKey)) {
+      return { code, credited: null, already: true };
+    }
+    await this.storage.put(doneKey, 1);
+
+    let credited = null;
+    const ref = (referredBy || "").trim();
+    if (ref) {
+      const refSub = await this.storage.get(`code:${ref}`);
+      if (refSub) {
+        const next = (await this._count(ref)) + 1;
+        await this.storage.put(`count:${ref}`, next);
+        await this._bumpLeaderboard(ref, next);
+        credited = { code: ref, subscriberId: refSub, referral_count: next };
+      } else {
+        credited = { code: ref, found: false };
+      }
+    }
+    return { code, credited };
+  }
+
+  // Migration/seed helper: import an existing pledger's code (and count) so
+  // referrals through links shared before this DO existed are still credited.
+  async _register({ subscriberId, code, count }) {
+    if (!code) return { ok: false };
+    await this.storage.put(`code:${code}`, String(subscriberId));
+    await this.storage.put(`sub:${subscriberId}`, code);
+    if (count != null) {
+      await this.storage.put(`count:${code}`, count);
+      await this._bumpLeaderboard(code, count);
+    }
+    return { ok: true };
+  }
+
+  async _count(code) {
+    return (await this.storage.get(`count:${code}`)) || 0;
+  }
+
+  async _bumpLeaderboard(code, count) {
+    let list = (await this.storage.get("lb:top")) || [];
+    list = list.filter((e) => e.code !== code);
+    if (count > 0) list.push({ code, alias: aliasFor(code), count });
+    list.sort((a, b) => b.count - a.count);
+    await this.storage.put("lb:top", list.slice(0, 50));
+  }
+
+  async _leaderboard(limit, code) {
+    const list = (await this.storage.get("lb:top")) || [];
+    const top = list.slice(0, clamp(limit || 20, 1, 50)).map((e, i) => ({
+      rank: i + 1,
+      alias: e.alias,
+      count: e.count,
+    }));
+    let you = null;
+    if (code) {
+      const idx = list.findIndex((e) => e.code === code);
+      if (idx >= 0) you = { rank: idx + 1, alias: list[idx].alias, count: list[idx].count };
+    }
+    return { top, you, total: list.length };
+  }
+
+  async _rate(ip) {
+    const key = `rate:${ip || "unknown"}`;
+    const now = Date.now();
+    let bucket = await this.storage.get(key);
+    if (!bucket || now - bucket.start >= RATE_WINDOW_MS) bucket = { start: now, count: 0 };
+    bucket.count += 1;
+    await this.storage.put(key, bucket);
+    return {
+      allowed: bucket.count <= RATE_MAX,
+      retryAfter: Math.ceil((bucket.start + RATE_WINDOW_MS - now) / 1000),
+    };
+  }
+}
+
+/* ========================================================================== */
+/* Durable Object: OutreachQueue                                              */
+/* ========================================================================== */
+
+export class OutreachQueue {
+  constructor(state, env) {
+    this.storage = state.storage;
+    this.env = env;
+  }
+
+  async fetch(request) {
+    const action = new URL(request.url).pathname.replace(/^\//, "");
+    const body = await request.json().catch(() => ({}));
+    try {
+      switch (action) {
+        case "create":
+          return await this._create(body);
+        case "list":
+          return json(await this._list(body));
+        case "update":
+          return await this._update(body.id, body.patch || {});
+        case "claim":
+          return json(await this._claim(body.staffer));
+        case "assign":
+          return await this._assign(body.staffers);
+        case "rosterGet":
+          return json({ roster: (await this.storage.get("roster")) || [] });
+        case "rosterSet": {
+          const roster = Array.isArray(body.roster) ? body.roster.map(String) : [];
+          await this.storage.put("roster", roster);
+          return json({ roster });
+        }
+        case "stats":
+          return json(await this._stats());
+        default:
+          return json({ error: "unknown_action" }, 400);
+      }
+    } catch (err) {
+      console.error("queue", err && err.stack ? err.stack : err);
+      return json({ error: "queue_error" }, 500);
+    }
+  }
+
+  async _all() {
+    const map = await this.storage.list({ prefix: "opp:" });
+    return [...map.values()];
+  }
+
+  async _create(body) {
+    // Guardrail: store a *public post* reference + workflow state only. No
+    // follower counts / profiling fields, even if sent.
+    if (!body.postUrl && !body.topic) {
+      return json({ error: "postUrl_or_topic_required" }, 400);
+    }
+    const now = new Date().toISOString();
+    const opp = {
+      id: crypto.randomUUID(),
+      createdAt: now,
+      updatedAt: now,
+      status: "new",
+      platform: str(body.platform, 40),
+      postUrl: str(body.postUrl, 500),
+      topic: str(body.topic, 120),
+      priority: clamp(parseInt(body.priority, 10) || 2, 1, 3),
+      note: str(body.note, 1000),
+      assignedTo: null,
+      assignedAt: null,
+      outcome: null,
+      reworkCount: 0,
+      followedUp: false,
+    };
+    // Atomic within the DO — concurrent creates can't clobber each other's
+    // index append (Codex review #4).
+    await this.storage.put(`opp:${opp.id}`, opp);
+    return json({ opportunity: opp }, 201);
+  }
+
+  async _list({ status, assignedTo }) {
+    let items = await this._all();
+    if (status) items = items.filter((o) => o.status === status);
+    if (assignedTo) items = items.filter((o) => o.assignedTo === assignedTo);
+    items.sort((a, b) => b.priority - a.priority || a.createdAt.localeCompare(b.createdAt));
+    return { opportunities: items, count: items.length };
+  }
+
+  async _update(id, patch) {
+    const opp = await this.storage.get(`opp:${id}`);
+    if (!opp) return json({ error: "not_found" }, 404);
+
+    if (patch.status !== undefined) {
+      if (!OPP_STATUSES.includes(patch.status)) return json({ error: "invalid_status" }, 400);
+      if (patch.status === "rework") {
+        if (opp.reworkCount >= MAX_REWORK) {
+          // Guardrail: never let re-work become repeat unsolicited contact.
+          opp.status = "dropped";
+          opp.note = appendNote(opp.note, "auto-dropped: re-work cap reached");
+          await this.storage.put(`opp:${id}`, touch(opp));
+          return json({ opportunity: opp, note: "rework_cap_reached_dropped" });
+        }
+        opp.reworkCount += 1;
+        opp.assignedTo = null;
+        opp.assignedAt = null;
+      }
+      opp.status = patch.status;
+    }
+    if (patch.outcome !== undefined) {
+      if (patch.outcome !== null && !OPP_OUTCOMES.includes(patch.outcome)) {
+        return json({ error: "invalid_outcome" }, 400);
+      }
+      opp.outcome = patch.outcome;
+    }
+    if (patch.assignedTo !== undefined) opp.assignedTo = patch.assignedTo ? String(patch.assignedTo) : null;
+    if (patch.priority !== undefined) opp.priority = clamp(parseInt(patch.priority, 10) || opp.priority, 1, 3);
+    if (patch.note !== undefined) opp.note = str(patch.note, 1000);
+    // "Did you vote?" follow-up logs only THAT a contact happened — never the answer.
+    if (patch.followedUp !== undefined) opp.followedUp = !!patch.followedUp;
+
+    await this.storage.put(`opp:${id}`, touch(opp));
+    return json({ opportunity: opp });
+  }
+
+  async _claim(staffer) {
+    staffer = str(staffer, 60);
+    if (!staffer) return { error: "staffer_required" };
+    const queue = (await this._all())
+      .filter((o) => o.status === "new" || o.status === "rework")
+      .sort((a, b) => b.priority - a.priority || a.createdAt.localeCompare(b.createdAt));
+    const next = queue[0];
+    if (!next) return { claimed: null, message: "queue_empty" };
+    // Single-winner: the DO serialises requests, so a second concurrent claim
+    // sees this item already assigned and picks the next one (Codex review #5).
+    next.status = "assigned";
+    next.assignedTo = staffer;
+    next.assignedAt = new Date().toISOString();
+    await this.storage.put(`opp:${next.id}`, touch(next));
+    return { claimed: next };
+  }
+
+  async _assign(staffers) {
+    const roster =
+      Array.isArray(staffers) && staffers.length
+        ? staffers.map(String)
+        : (await this.storage.get("roster")) || [];
+    if (!roster.length) return json({ error: "no_roster" }, 400);
+
+    const queue = (await this._all())
+      .filter((o) => o.status === "new")
+      .sort((a, b) => b.priority - a.priority || a.createdAt.localeCompare(b.createdAt));
+
+    let pointer = (await this.storage.get("rotation")) | 0;
+    const assignments = [];
+    const now = new Date().toISOString();
+    for (const opp of queue) {
+      const staffer = roster[pointer % roster.length];
+      pointer++;
+      opp.status = "assigned";
+      opp.assignedTo = staffer;
+      opp.assignedAt = now;
+      await this.storage.put(`opp:${opp.id}`, touch(opp));
+      assignments.push({ id: opp.id, assignedTo: staffer });
+    }
+    await this.storage.put("rotation", pointer);
+    return json({ assigned: assignments.length, assignments });
+  }
+
+  async _stats() {
+    const all = await this._all();
+    const byStatus = {};
+    const byOutcome = {};
+    const byStaffer = {};
+    let followedUp = 0;
+    for (const o of all) {
+      byStatus[o.status] = (byStatus[o.status] || 0) + 1;
+      if (o.outcome) byOutcome[o.outcome] = (byOutcome[o.outcome] || 0) + 1;
+      if (o.assignedTo) {
+        byStaffer[o.assignedTo] = byStaffer[o.assignedTo] || { assigned: 0, converted: 0 };
+        byStaffer[o.assignedTo].assigned += 1;
+        if (o.status === "converted") byStaffer[o.assignedTo].converted += 1;
+      }
+      if (o.followedUp) followedUp += 1;
+    }
+    return { total: all.length, byStatus, byOutcome, byStaffer, followedUp };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Durable Object plumbing                                                    */
+/* -------------------------------------------------------------------------- */
+
+function ledgerStub(env) {
+  return env.REFERRAL_LEDGER.get(env.REFERRAL_LEDGER.idFromName("ledger"));
+}
+function queueStub(env) {
+  return env.OUTREACH_QUEUE.get(env.OUTREACH_QUEUE.idFromName("queue"));
+}
+async function callDO(stub, action, payload) {
+  const res = await stub.fetch(
+    new Request(`https://do/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {}),
+    })
+  );
+  return { status: res.status, data: await res.json() };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Referral codes + aliases                                                   */
+/* -------------------------------------------------------------------------- */
+
+function randomCode() {
+  const bytes = new Uint8Array(CODE_LENGTH);
+  crypto.getRandomValues(bytes);
+  let out = "";
+  for (let i = 0; i < CODE_LENGTH; i++) out += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
+  return out;
+}
+
+// Generated alias keeps the leaderboard fun and identity-free (Build Brief §6).
 const ALIAS_ADJ = ["Swift","Bold","Quiet","Bright","Steady","Keen","Brave","Sharp","Calm","Lucky","Mighty","Nimble","Royal","Wise","Fierce","Sunny","Gallant","Plucky","Loyal","Cheery"];
 const ALIAS_NOUN = ["Otter","Badger","Falcon","Heron","Stag","Fox","Hare","Owl","Wren","Lynx","Robin","Marten","Kite","Adder","Tern","Pony","Hedgehog","Squirrel","Curlew","Puffin"];
 
@@ -188,270 +598,6 @@ function aliasFor(code) {
   }
   h = h >>> 0;
   return `${ALIAS_ADJ[h % ALIAS_ADJ.length]} ${ALIAS_NOUN[Math.floor(h / ALIAS_ADJ.length) % ALIAS_NOUN.length]}`;
-}
-
-async function updateLeaderboard(env, code, count) {
-  const list = await kvGetJSON(env, "lb:top", []);
-  const existing = list.find((e) => e.code === code);
-  if (existing) existing.count = count;
-  else list.push({ code, alias: aliasFor(code), count });
-  list.sort((a, b) => b.count - a.count);
-  await kvPutJSON(env, "lb:top", list.slice(0, 50));
-}
-
-async function handleLeaderboard(url, env) {
-  const limit = clamp(parseInt(url.searchParams.get("limit"), 10) || 20, 1, 50);
-  const code = (url.searchParams.get("code") || "").trim();
-  const list = await kvGetJSON(env, "lb:top", []);
-
-  const top = list.slice(0, limit).map((e, i) => ({
-    rank: i + 1,
-    alias: e.alias,
-    count: e.count,
-  }));
-
-  let you = null;
-  if (code) {
-    const idx = list.findIndex((e) => e.code === code);
-    if (idx >= 0) {
-      you = { rank: idx + 1, alias: list[idx].alias, count: list[idx].count };
-    }
-  }
-
-  return json({ top, you, total: list.length });
-}
-
-/* -------------------------------------------------------------------------- */
-/* Staffer console / outreach queue (staff-only)                              */
-/* -------------------------------------------------------------------------- */
-
-async function handleStaff(request, url, env) {
-  if (!verifyToken(request, env.STAFF_TOKEN)) {
-    return json({ error: "unauthorized" }, 401);
-  }
-
-  const path = url.pathname.replace(/\/+$/, "");
-  const method = request.method;
-
-  if (path === "/staff/opportunities") {
-    if (method === "GET") return listOpportunities(url, env);
-    if (method === "POST") return createOpportunity(await readBody(request), env);
-  }
-
-  const idMatch = path.match(/^\/staff\/opportunities\/([\w-]+)$/);
-  if (idMatch && (method === "POST" || method === "PATCH")) {
-    return updateOpportunity(idMatch[1], await readBody(request), env);
-  }
-
-  if (path === "/staff/claim" && method === "POST") {
-    return claimOpportunity(await readBody(request), env);
-  }
-  if (path === "/staff/assign" && method === "POST") {
-    return assignRoundRobin(await readBody(request), env);
-  }
-  if (path === "/staff/roster") {
-    if (method === "GET") return json({ roster: await kvGetJSON(env, "staff:roster", []) });
-    if (method === "POST") {
-      const body = await readBody(request);
-      const roster = Array.isArray(body.roster) ? body.roster.map(String) : [];
-      await kvPutJSON(env, "staff:roster", roster);
-      return json({ roster });
-    }
-  }
-  if (path === "/staff/stats" && method === "GET") {
-    return staffStats(env);
-  }
-
-  return json({ error: "not_found" }, 404);
-}
-
-async function createOpportunity(body, env) {
-  // Guardrail: store a *public post* reference + workflow state only. We do not
-  // accept or persist follower counts / profiling fields, even if sent.
-  if (!body.postUrl && !body.topic) {
-    return json({ error: "postUrl_or_topic_required" }, 400);
-  }
-  const now = new Date().toISOString();
-  const opp = {
-    id: crypto.randomUUID(),
-    createdAt: now,
-    updatedAt: now,
-    status: "new",
-    platform: str(body.platform, 40),
-    postUrl: str(body.postUrl, 500),
-    topic: str(body.topic, 120),
-    priority: clamp(parseInt(body.priority, 10) || 2, 1, 3),
-    note: str(body.note, 1000),
-    assignedTo: null,
-    assignedAt: null,
-    outcome: null,
-    reworkCount: 0,
-    followedUp: false,
-  };
-  await kvPutJSON(env, `opp:${opp.id}`, opp);
-  const index = await kvGetJSON(env, "opp:index", []);
-  index.push(opp.id);
-  await kvPutJSON(env, "opp:index", index);
-  return json({ opportunity: opp }, 201);
-}
-
-async function listOpportunities(url, env) {
-  const status = url.searchParams.get("status");
-  const assignedTo = url.searchParams.get("assignedTo");
-  const all = await loadAllOpportunities(env);
-  let items = all;
-  if (status) items = items.filter((o) => o.status === status);
-  if (assignedTo) items = items.filter((o) => o.assignedTo === assignedTo);
-  // newest first, but prioritise higher-priority within the queue view
-  items.sort((a, b) => b.priority - a.priority || a.createdAt.localeCompare(b.createdAt));
-  return json({ opportunities: items, count: items.length });
-}
-
-async function updateOpportunity(id, body, env) {
-  const opp = await kvGetJSON(env, `opp:${id}`, null);
-  if (!opp) return json({ error: "not_found" }, 404);
-
-  if (body.status !== undefined) {
-    if (!OPP_STATUSES.includes(body.status)) {
-      return json({ error: "invalid_status" }, 400);
-    }
-    if (body.status === "rework") {
-      if (opp.reworkCount >= MAX_REWORK) {
-        // Guardrail: never let re-work become repeat unsolicited contact.
-        opp.status = "dropped";
-        opp.note = appendNote(opp.note, "auto-dropped: re-work cap reached");
-        await kvPutJSON(env, `opp:${id}`, touch(opp));
-        return json({ opportunity: opp, note: "rework_cap_reached_dropped" });
-      }
-      opp.reworkCount += 1;
-      opp.assignedTo = null;
-      opp.assignedAt = null;
-    }
-    opp.status = body.status;
-  }
-  if (body.outcome !== undefined) {
-    if (body.outcome !== null && !OPP_OUTCOMES.includes(body.outcome)) {
-      return json({ error: "invalid_outcome" }, 400);
-    }
-    opp.outcome = body.outcome;
-  }
-  if (body.assignedTo !== undefined) opp.assignedTo = body.assignedTo ? String(body.assignedTo) : null;
-  if (body.priority !== undefined) opp.priority = clamp(parseInt(body.priority, 10) || opp.priority, 1, 3);
-  if (body.note !== undefined) opp.note = str(body.note, 1000);
-  // "Did you vote?" follow-up logs only THAT contact happened — never the answer.
-  if (body.followedUp !== undefined) opp.followedUp = !!body.followedUp;
-
-  await kvPutJSON(env, `opp:${id}`, touch(opp));
-  return json({ opportunity: opp });
-}
-
-async function claimOpportunity(body, env) {
-  const staffer = str(body.staffer, 60);
-  if (!staffer) return json({ error: "staffer_required" }, 400);
-
-  const all = await loadAllOpportunities(env);
-  const queue = all
-    .filter((o) => o.status === "new" || o.status === "rework")
-    .sort((a, b) => b.priority - a.priority || a.createdAt.localeCompare(b.createdAt));
-
-  const next = queue[0];
-  if (!next) return json({ claimed: null, message: "queue_empty" });
-
-  next.status = "assigned";
-  next.assignedTo = staffer;
-  next.assignedAt = new Date().toISOString();
-  await kvPutJSON(env, `opp:${next.id}`, touch(next));
-  return json({ claimed: next });
-}
-
-async function assignRoundRobin(body, env) {
-  const roster =
-    Array.isArray(body.staffers) && body.staffers.length
-      ? body.staffers.map(String)
-      : await kvGetJSON(env, "staff:roster", []);
-  if (!roster.length) return json({ error: "no_roster" }, 400);
-
-  const all = await loadAllOpportunities(env);
-  const queue = all
-    .filter((o) => o.status === "new")
-    .sort((a, b) => b.priority - a.priority || a.createdAt.localeCompare(b.createdAt));
-
-  let pointer = (await kvGetJSON(env, "staff:rotation", 0)) | 0;
-  const assignments = [];
-  const now = new Date().toISOString();
-  for (const opp of queue) {
-    const staffer = roster[pointer % roster.length];
-    pointer++;
-    opp.status = "assigned";
-    opp.assignedTo = staffer;
-    opp.assignedAt = now;
-    await kvPutJSON(env, `opp:${opp.id}`, touch(opp));
-    assignments.push({ id: opp.id, assignedTo: staffer });
-  }
-  await kvPutJSON(env, "staff:rotation", pointer);
-  return json({ assigned: assignments.length, assignments });
-}
-
-async function staffStats(env) {
-  const all = await loadAllOpportunities(env);
-  const byStatus = {};
-  const byOutcome = {};
-  const byStaffer = {};
-  let followedUp = 0;
-  for (const o of all) {
-    byStatus[o.status] = (byStatus[o.status] || 0) + 1;
-    if (o.outcome) byOutcome[o.outcome] = (byOutcome[o.outcome] || 0) + 1;
-    if (o.assignedTo) {
-      byStaffer[o.assignedTo] = byStaffer[o.assignedTo] || { assigned: 0, converted: 0 };
-      byStaffer[o.assignedTo].assigned += 1;
-      if (o.status === "converted") byStaffer[o.assignedTo].converted += 1;
-    }
-    if (o.followedUp) followedUp += 1;
-  }
-  return json({
-    total: all.length,
-    byStatus,
-    byOutcome,
-    byStaffer,
-    followedUp,
-  });
-}
-
-async function loadAllOpportunities(env) {
-  const index = await kvGetJSON(env, "opp:index", []);
-  const items = await Promise.all(index.map((id) => kvGetJSON(env, `opp:${id}`, null)));
-  return items.filter(Boolean);
-}
-
-/* -------------------------------------------------------------------------- */
-/* Referral codes                                                             */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Generate a unique code, persist the code -> subscriber-id index in KV, and
- * write the code back onto the subscriber. Retries on the (vanishingly rare)
- * KV collision.
- */
-async function mintCode(env, subscriberId) {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const code = randomCode();
-    const existing = await env.REFERRALS.get(`code:${code}`);
-    if (existing && existing !== String(subscriberId)) continue; // collision
-    await env.REFERRALS.put(`code:${code}`, String(subscriberId));
-    await mlUpdateSubscriber(env, subscriberId, { referral_code: code });
-    return code;
-  }
-  throw new Error("could not mint a unique referral code after 5 attempts");
-}
-
-function randomCode() {
-  const bytes = new Uint8Array(CODE_LENGTH);
-  crypto.getRandomValues(bytes);
-  let out = "";
-  for (let i = 0; i < CODE_LENGTH; i++) {
-    out += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
-  }
-  return out;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -472,27 +618,19 @@ async function mlFetch(env, method, path, body) {
   if (res.status === 404) return { status: 404, data: null };
   const data = await res.json().catch(() => null);
   if (!res.ok) {
-    throw new Error(
-      `MailerLite ${method} ${path} -> ${res.status} ${JSON.stringify(data)}`
-    );
+    throw new Error(`MailerLite ${method} ${path} -> ${res.status} ${JSON.stringify(data)}`);
   }
   return { status: res.status, data };
 }
 
 // Identifier may be a subscriber id or an email — both are accepted by the API.
 async function mlGetSubscriber(env, identifier) {
-  const { data } = await mlFetch(
-    env,
-    "GET",
-    `/subscribers/${encodeURIComponent(identifier)}`
-  );
+  const { data } = await mlFetch(env, "GET", `/subscribers/${encodeURIComponent(identifier)}`);
   return data ? data.data : null;
 }
 
 async function mlUpdateSubscriber(env, subscriberId, fields) {
-  const { data } = await mlFetch(env, "PUT", `/subscribers/${subscriberId}`, {
-    fields,
-  });
+  const { data } = await mlFetch(env, "PUT", `/subscribers/${subscriberId}`, { fields });
   return data ? data.data : null;
 }
 
@@ -530,13 +668,13 @@ async function readBody(request) {
   return (await request.json().catch(() => null)) || {};
 }
 
-async function kvGetJSON(env, key, def) {
-  const raw = await env.REFERRALS.get(key);
-  return raw ? JSON.parse(raw) : def;
-}
-
-async function kvPutJSON(env, key, val) {
-  await env.REFERRALS.put(key, JSON.stringify(val));
+async function safe(fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    console.error("mirror_failed", err && err.message ? err.message : err);
+    return null;
+  }
 }
 
 function touch(opp) {
@@ -565,16 +703,27 @@ function today() {
   return new Date().toISOString().slice(0, 10); // YYYY-MM-DD for MailerLite date field
 }
 
-function json(body, status = 200) {
+function json(body, status = 200, extraHeaders) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: Object.assign({ "Content-Type": "application/json" }, extraHeaders || {}),
   });
 }
 
-function cors(env, response) {
+/**
+ * Origin-aware CORS. Public endpoints stay locked to the site origin; staff
+ * endpoints reflect the request origin because they are token-authenticated and
+ * credential-less — this lets the console run from the documented contexts
+ * (hosted elsewhere or opened locally) without weakening security
+ * (Codex review #10).
+ */
+function applyCors(env, request, response) {
+  const path = new URL(request.url).pathname;
   const headers = new Headers(response.headers);
-  headers.set("Access-Control-Allow-Origin", shareBase(env));
+  const allowOrigin = path.startsWith("/staff/")
+    ? request.headers.get("Origin") || "*"
+    : shareBase(env);
+  headers.set("Access-Control-Allow-Origin", allowOrigin);
   headers.set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
   headers.set("Access-Control-Allow-Headers", "Content-Type, X-Staff-Token, X-Webhook-Token");
   headers.set("Vary", "Origin");

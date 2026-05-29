@@ -1,12 +1,46 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import worker from "../src/index.js";
+import worker, { ReferralLedger, OutreachQueue } from "../src/index.js";
 
-/* In-memory MailerLite + KV so we can exercise the real worker code paths. */
+/* In-memory MailerLite + Durable Objects so we exercise the real worker +
+   DO code paths end to end. */
+
+function makeStorage() {
+  const m = new Map();
+  return {
+    async get(k) {
+      return m.has(k) ? structuredClone(m.get(k)) : undefined;
+    },
+    async put(k, v) {
+      m.set(k, structuredClone(v));
+    },
+    async delete(k) {
+      return m.delete(k);
+    },
+    async list({ prefix } = {}) {
+      const out = new Map();
+      for (const [k, v] of m) if (!prefix || k.startsWith(prefix)) out.set(k, structuredClone(v));
+      return out;
+    },
+  };
+}
+
+// Fake DurableObjectNamespace: one instance per name, routed via fetch.
+function makeNamespace(DOClass, env) {
+  const instances = new Map();
+  return {
+    idFromName: (name) => ({ name }),
+    get: (id) => {
+      if (!instances.has(id.name)) instances.set(id.name, new DOClass({ storage: makeStorage() }, env));
+      const inst = instances.get(id.name);
+      return { fetch: (req) => inst.fetch(req) };
+    },
+  };
+}
 
 function makeEnv() {
   const subscribers = new Map(); // id -> { id, email, status, fields }
-  const byEmail = new Map(); // email -> id
+  const byEmail = new Map();
   let nextId = 1000;
 
   function addSubscriber({ email, status = "active", fields = {} }) {
@@ -17,81 +51,77 @@ function makeEnv() {
     return sub;
   }
 
-  const kv = (() => {
-    const m = new Map();
-    return {
-      get: async (k) => (m.has(k) ? m.get(k) : null),
-      put: async (k, v) => void m.set(k, v),
-    };
-  })();
-
   // Stub global fetch to emulate the MailerLite Connect API.
   globalThis.fetch = async (urlStr, opts = {}) => {
     const url = new URL(urlStr);
     const parts = url.pathname.split("/").filter(Boolean); // ["api","subscribers",id]
     const ident = decodeURIComponent(parts[2] || "");
     const method = opts.method || "GET";
-
     let id = subscribers.has(ident) ? ident : byEmail.get(ident.toLowerCase());
 
     if (method === "GET") {
-      if (!id) return jsonResponse(404, {});
-      return jsonResponse(200, { data: subscribers.get(id) });
+      if (!id) return resp(404, {});
+      return resp(200, { data: subscribers.get(id) });
     }
     if (method === "PUT") {
       const body = JSON.parse(opts.body);
       const sub = subscribers.get(id);
       sub.fields = { ...sub.fields, ...body.fields };
-      return jsonResponse(200, { data: sub });
+      return resp(200, { data: sub });
     }
-    return jsonResponse(405, {});
+    return resp(405, {});
   };
 
-  return {
-    env: {
-      MAILERLITE_API_TOKEN: "test-token",
-      WEBHOOK_SECRET: "s3cret",
-      STAFF_TOKEN: "staff-s3cret",
-      SITE_BASE_URL: "https://james4nationwide.co.uk",
-      REFERRALS: kv,
-    },
-    addSubscriber,
-    subscribers,
-    kv,
+  const env = {
+    MAILERLITE_API_TOKEN: "test-token",
+    WEBHOOK_SECRET: "s3cret",
+    STAFF_TOKEN: "staff-s3cret",
+    SITE_BASE_URL: "https://james4nationwide.co.uk",
   };
+  env.REFERRAL_LEDGER = makeNamespace(ReferralLedger, env);
+  env.OUTREACH_QUEUE = makeNamespace(OutreachQueue, env);
+
+  // Direct ledger access for seeding existing pledgers.
+  const ledger = (action, payload) =>
+    env.REFERRAL_LEDGER.get(env.REFERRAL_LEDGER.idFromName("ledger"))
+      .fetch(new Request("https://do/" + action, { method: "POST", body: JSON.stringify(payload) }))
+      .then((r) => r.json());
+
+  return { env, addSubscriber, subscribers, ledger };
 }
 
-function jsonResponse(status, body) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
+function resp(status, body) {
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
 const call = (env, url, init) => worker.fetch(new Request(url, init), env, {});
 
-test("lookup lazily mints a code and returns a working link without sealing pledged_at", async () => {
+/* ------------------------------- referral ------------------------------ */
+
+test("lookup lazily mints a stable code and a working link, without sealing", async () => {
   const ctx = makeEnv();
   ctx.addSubscriber({ email: "alice@example.com", status: "unconfirmed" });
 
-  const res = await call(
-    ctx.env,
-    "https://w/referral?email=alice@example.com"
-  );
+  const res = await call(ctx.env, "https://w/referral?email=alice@example.com");
   const body = await res.json();
 
   assert.equal(res.status, 200);
   assert.match(body.referral_code, /^[A-Z2-9]{7}$/);
   assert.equal(body.referral_count, 0);
-  assert.equal(
-    body.referral_link,
-    `https://james4nationwide.co.uk/pledge/?ref=${body.referral_code}`
-  );
-  // Must NOT have stamped pledged_at — the webhook still needs to credit later.
-  const sub = [...ctx.subscribers.values()][0];
-  assert.equal(sub.fields.pledged_at, undefined);
-  // Code must be resolvable back to the subscriber via KV.
-  assert.equal(await ctx.kv.get(`code:${body.referral_code}`), sub.id);
+  assert.equal(body.referral_link, `https://james4nationwide.co.uk/pledge/?ref=${body.referral_code}`);
+  // Did not stamp pledged_at — the webhook still needs to credit later.
+  assert.equal([...ctx.subscribers.values()][0].fields.pledged_at, undefined);
+
+  // Stable: a second lookup returns the same code.
+  const again = await (await call(ctx.env, "https://w/referral?email=alice@example.com")).json();
+  assert.equal(again.referral_code, body.referral_code);
+});
+
+test("unknown email returns pending (no pledged/not-pledged oracle)", async () => {
+  const ctx = makeEnv();
+  const res = await call(ctx.env, "https://w/referral?email=nobody@example.com");
+  assert.equal(res.status, 202);
+  assert.equal((await res.json()).status, "pending");
 });
 
 test("confirmation webhook credits the referrer exactly once (idempotent)", async () => {
@@ -100,7 +130,7 @@ test("confirmation webhook credits the referrer exactly once (idempotent)", asyn
     email: "ref@example.com",
     fields: { referral_code: "ABCDEFG", referral_count: 2 },
   });
-  await ctx.kv.put("code:ABCDEFG", referrer.id);
+  await ctx.ledger("register", { subscriberId: referrer.id, code: "ABCDEFG", count: 2 });
 
   const newbie = ctx.addSubscriber({
     email: "bob@example.com",
@@ -112,15 +142,12 @@ test("confirmation webhook credits the referrer exactly once (idempotent)", asyn
     call(ctx.env, "https://w/webhook?token=s3cret", {
       method: "POST",
       body: JSON.stringify({
-        events: [
-          { type: "subscriber.updated", data: { subscriber: { id: newbie.id, status: "active" } } },
-        ],
+        events: [{ type: "subscriber.updated", data: { subscriber: { id: newbie.id, status: "active" } } }],
       }),
     });
 
   await (await fire()).json();
-  // Re-deliver the same event: pledged_at gate should make it a no-op.
-  await (await fire()).json();
+  await (await fire()).json(); // re-delivery must be a no-op
 
   assert.equal(ctx.subscribers.get(referrer.id).fields.referral_count, 3);
   assert.ok(ctx.subscribers.get(newbie.id).fields.pledged_at);
@@ -138,11 +165,8 @@ test("webhook rejects a bad/missing token", async () => {
 
 test("unconfirmed subscribers are not credited", async () => {
   const ctx = makeEnv();
-  const referrer = ctx.addSubscriber({
-    email: "ref@example.com",
-    fields: { referral_code: "ZZZ2345", referral_count: 0 },
-  });
-  await ctx.kv.put("code:ZZZ2345", referrer.id);
+  const referrer = ctx.addSubscriber({ email: "ref@example.com", fields: { referral_code: "ZZZ2345", referral_count: 0 } });
+  await ctx.ledger("register", { subscriberId: referrer.id, code: "ZZZ2345", count: 0 });
   const newbie = ctx.addSubscriber({
     email: "carol@example.com",
     status: "unconfirmed",
@@ -151,25 +175,47 @@ test("unconfirmed subscribers are not credited", async () => {
 
   await call(ctx.env, "https://w/webhook?token=s3cret", {
     method: "POST",
-    body: JSON.stringify({
-      events: [{ data: { subscriber: { id: newbie.id, status: "unconfirmed" } } }],
-    }),
+    body: JSON.stringify({ events: [{ data: { subscriber: { id: newbie.id, status: "unconfirmed" } } }] }),
   });
 
   assert.equal(ctx.subscribers.get(referrer.id).fields.referral_count, 0);
+});
+
+test("a referral through a freshly lazy-minted code is still credited (no KV lag)", async () => {
+  const ctx = makeEnv();
+  // Referrer pledges and only ever hit the thank-you page (lazy mint), never a webhook.
+  const referrer = ctx.addSubscriber({ email: "early@example.com", status: "unconfirmed" });
+  const look = await (await call(ctx.env, "https://w/referral?email=early@example.com")).json();
+  const code = look.referral_code;
+
+  // Someone signs up through that code and confirms.
+  const newbie = ctx.addSubscriber({ email: "late@example.com", status: "active", fields: { referred_by: code } });
+  await call(ctx.env, "https://w/webhook?token=s3cret", {
+    method: "POST",
+    body: JSON.stringify({ events: [{ data: { subscriber: { id: newbie.id, status: "active" } } }] }),
+  });
+
+  const lb = await (await call(ctx.env, "https://w/leaderboard?code=" + code)).json();
+  assert.equal(lb.you.count, 1);
+});
+
+test("rate limiting kicks in on the public referral endpoint", async () => {
+  const ctx = makeEnv();
+  ctx.addSubscriber({ email: "x@example.com", status: "active" });
+  let last;
+  for (let i = 0; i < 31; i++) {
+    last = await call(ctx.env, "https://w/referral?email=x@example.com");
+  }
+  assert.equal(last.status, 429);
 });
 
 /* ----------------------------- leaderboard ----------------------------- */
 
 test("crediting a referrer puts them on the anonymised leaderboard", async () => {
   const ctx = makeEnv();
-  const referrer = ctx.addSubscriber({
-    email: "ref@example.com",
-    fields: { referral_code: "LEAD123", referral_count: 0 },
-  });
-  await ctx.kv.put("code:LEAD123", referrer.id);
+  const referrer = ctx.addSubscriber({ email: "ref@example.com", fields: { referral_code: "LEAD123" } });
+  await ctx.ledger("register", { subscriberId: referrer.id, code: "LEAD123", count: 0 });
 
-  // two confirmed referrals through LEAD123
   for (const email of ["a@example.com", "b@example.com"]) {
     const n = ctx.addSubscriber({ email, status: "active", fields: { referred_by: "LEAD123" } });
     await call(ctx.env, "https://w/webhook?token=s3cret", {
@@ -178,9 +224,7 @@ test("crediting a referrer puts them on the anonymised leaderboard", async () =>
     });
   }
 
-  const res = await call(ctx.env, "https://w/leaderboard?code=LEAD123");
-  const body = await res.json();
-
+  const body = await (await call(ctx.env, "https://w/leaderboard?code=LEAD123")).json();
   assert.equal(body.top.length, 1);
   assert.equal(body.top[0].rank, 1);
   assert.equal(body.top[0].count, 2);
@@ -192,23 +236,22 @@ test("crediting a referrer puts them on the anonymised leaderboard", async () =>
 /* --------------------------- staffer console --------------------------- */
 
 const staff = (env, path, init = {}) =>
-  call(env, "https://w" + path, {
-    ...init,
-    headers: { "x-staff-token": "staff-s3cret", ...(init.headers || {}) },
-  });
+  call(env, "https://w" + path, { ...init, headers: { "x-staff-token": "staff-s3cret", ...(init.headers || {}) } });
 
 test("staff endpoints reject a missing token", async () => {
   const ctx = makeEnv();
-  const res = await call(ctx.env, "https://w/staff/stats");
-  assert.equal(res.status, 401);
+  assert.equal((await call(ctx.env, "https://w/staff/stats")).status, 401);
+});
+
+test("staff endpoints reflect the request Origin in CORS (console can run anywhere)", async () => {
+  const ctx = makeEnv();
+  const res = await staff(ctx.env, "/staff/stats", { headers: { Origin: "http://localhost:5500" } });
+  assert.equal(res.headers.get("Access-Control-Allow-Origin"), "http://localhost:5500");
 });
 
 test("opportunity lifecycle: create -> round-robin assign -> convert -> stats", async () => {
   const ctx = makeEnv();
-  await staff(ctx.env, "/staff/roster", {
-    method: "POST",
-    body: JSON.stringify({ roster: ["Alex", "Sam"] }),
-  });
+  await staff(ctx.env, "/staff/roster", { method: "POST", body: JSON.stringify({ roster: ["Alex", "Sam"] }) });
 
   const ids = [];
   for (const topic of ["FairerShare", "AGM", "Quick Vote"]) {
@@ -219,16 +262,10 @@ test("opportunity lifecycle: create -> round-robin assign -> convert -> stats", 
     ids.push((await r.json()).opportunity.id);
   }
 
-  const assignRes = await staff(ctx.env, "/staff/assign", { method: "POST", body: "{}" });
-  const assign = await assignRes.json();
+  const assign = await (await staff(ctx.env, "/staff/assign", { method: "POST", body: "{}" })).json();
   assert.equal(assign.assigned, 3);
-  // round robin Alex, Sam, Alex
-  assert.deepEqual(
-    assign.assignments.map((a) => a.assignedTo),
-    ["Alex", "Sam", "Alex"]
-  );
+  assert.deepEqual(assign.assignments.map((a) => a.assignedTo), ["Alex", "Sam", "Alex"]);
 
-  // convert the first one
   await staff(ctx.env, "/staff/opportunities/" + ids[0], {
     method: "POST",
     body: JSON.stringify({ status: "converted", outcome: "pledged", followedUp: true }),
@@ -245,48 +282,23 @@ test("opportunity lifecycle: create -> round-robin assign -> convert -> stats", 
 
 test("re-work is capped so it can never become repeat unsolicited contact", async () => {
   const ctx = makeEnv();
-  const r = await staff(ctx.env, "/staff/opportunities", {
-    method: "POST",
-    body: JSON.stringify({ topic: "FairerShare" }),
-  });
-  const id = (await r.json()).opportunity.id;
+  const id = (await (await staff(ctx.env, "/staff/opportunities", { method: "POST", body: JSON.stringify({ topic: "FairerShare" }) })).json()).opportunity.id;
 
-  // send to rework MAX_REWORK (2) times — both allowed
   for (let i = 0; i < 2; i++) {
-    const res = await staff(ctx.env, "/staff/opportunities/" + id, {
-      method: "POST",
-      body: JSON.stringify({ status: "rework" }),
-    });
+    const res = await staff(ctx.env, "/staff/opportunities/" + id, { method: "POST", body: JSON.stringify({ status: "rework" }) });
     assert.equal((await res.json()).opportunity.status, "rework");
   }
-  // third time trips the cap -> auto-dropped
-  const res = await staff(ctx.env, "/staff/opportunities/" + id, {
-    method: "POST",
-    body: JSON.stringify({ status: "rework" }),
-  });
-  const body = await res.json();
+  const body = await (await staff(ctx.env, "/staff/opportunities/" + id, { method: "POST", body: JSON.stringify({ status: "rework" }) })).json();
   assert.equal(body.note, "rework_cap_reached_dropped");
   assert.equal(body.opportunity.status, "dropped");
 });
 
-test("claim pulls the highest-priority item first", async () => {
+test("claim pulls the highest-priority item first and assigns it", async () => {
   const ctx = makeEnv();
-  await staff(ctx.env, "/staff/opportunities", {
-    method: "POST",
-    body: JSON.stringify({ topic: "low", priority: 1 }),
-  });
-  await staff(ctx.env, "/staff/opportunities", {
-    method: "POST",
-    body: JSON.stringify({ topic: "high", priority: 3 }),
-  });
+  await staff(ctx.env, "/staff/opportunities", { method: "POST", body: JSON.stringify({ topic: "low", priority: 1 }) });
+  await staff(ctx.env, "/staff/opportunities", { method: "POST", body: JSON.stringify({ topic: "high", priority: 3 }) });
 
-  const claimed = await (
-    await staff(ctx.env, "/staff/claim", {
-      method: "POST",
-      body: JSON.stringify({ staffer: "Sam" }),
-    })
-  ).json();
-
+  const claimed = await (await staff(ctx.env, "/staff/claim", { method: "POST", body: JSON.stringify({ staffer: "Sam" }) })).json();
   assert.equal(claimed.claimed.topic, "high");
   assert.equal(claimed.claimed.assignedTo, "Sam");
   assert.equal(claimed.claimed.status, "assigned");

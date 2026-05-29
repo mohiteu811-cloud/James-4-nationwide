@@ -3,21 +3,22 @@
 The referral attribution layer for the Pledge & Remind campaign — the only
 custom-engineered component (Build Brief §4). A single Cloudflare Worker.
 
-- **No new PII store.** Per-subscriber state (`referral_code`, `referred_by`,
-  `referral_count`, `pledged_at`, `source`) lives in MailerLite custom fields.
-  The only extra storage is a Cloudflare KV namespace holding an opaque
-  `referral_code → subscriber-id` index — no email, name, or membership data.
-- **Two endpoints:** `POST /webhook` (MailerLite confirmation) and
-  `GET /referral?email=…` (thank-you page link + live count).
+- **No new PII store.** State lives in two **Durable Objects** (`ReferralLedger`,
+  `OutreachQueue`) — strongly consistent, so referral counts and the outreach
+  queue update atomically with no races. They hold only opaque codes + counts
+  and references to *public* posts. MailerLite custom fields mirror the counts
+  for display/segmentation.
+- **Endpoints:** `POST /webhook` (MailerLite confirmation), `GET /referral`
+  (thank-you link + count), `GET /leaderboard`, and the token-protected
+  `/staff/*` outreach API.
 
 See **`../docs/deployment.md`** for full setup. Quick start:
 
 ```bash
 npm install
-npx wrangler kv namespace create REFERRALS         # paste id into wrangler.toml
-npx wrangler kv namespace create REFERRALS --preview
 npx wrangler secret put MAILERLITE_API_TOKEN
 npx wrangler secret put WEBHOOK_SECRET
-npm test            # in-memory tests, no account needed
-npm run deploy
+npx wrangler secret put STAFF_TOKEN
+npm test            # 13 in-memory tests, no account needed
+npm run deploy      # Durable Objects are created by the migration in wrangler.toml
 ```

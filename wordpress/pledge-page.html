@@ -119,11 +119,19 @@
 
     if (document.readyState !== "loading") inject();
     else document.addEventListener("DOMContentLoaded", inject);
-    // MailerLite injects its form asynchronously; re-run a few times to be safe.
-    var tries = 0;
-    var iv = setInterval(function () {
-      inject();
-      if (++tries > 20) clearInterval(iv);
-    }, 300);
+
+    // The MailerLite embed is a third-party async form that can appear at any
+    // time (slow mobile, deferred scripts). A MutationObserver keeps watching
+    // for the whole life of the page instead of giving up after a few seconds,
+    // so late-rendered forms still carry referred_by.
+    if (window.MutationObserver) {
+      var observer = new MutationObserver(function () { inject(); });
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
+    // Belt-and-braces: also inject right before any submit, in case the field
+    // was added after our last run.
+    document.addEventListener("submit", function (e) {
+      if (e.target && e.target.closest && e.target.closest(".j4n-form-wrap")) inject();
+    }, true);
   })();
 </script>

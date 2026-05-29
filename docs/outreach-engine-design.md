@@ -49,20 +49,30 @@ leaderboard and staffer-console builds in this repo.
 
 ## Data model
 
-Stored in the existing Cloudflare KV (no new PII store; opportunities reference
-*public* posts, not private profiles):
+Stored in two **Durable Objects** (strongly consistent — atomic counts and an
+atomic queue; no new PII store; opportunities reference *public* posts, not
+private profiles):
 
+**`ReferralLedger`** (authoritative; MailerLite fields mirror it for display):
 ```
-opp:index            -> ["<id>", ...]                     # list of opportunity ids
-opp:<id>             -> { id, createdAt, updatedAt,
-                          status,        # new|assigned|contacted|converted|dropped|rework
-                          platform, postUrl, topic, priority(1-3),
-                          assignedTo, assignedAt,
-                          outcome,       # pledged|subscribed|followed|none
-                          reworkCount, note, followedUp(bool) }
-staff:roster         -> ["Alex","Sam", ...]               # on-duty staffers
-staff:rotation       -> <int>                             # round-robin pointer
-lb:top               -> [ { code, alias, count }, ... ]   # leaderboard (top 50)
+code:<code>   -> "<subscriberId>"     # code index (atomic mint, no KV lag)
+sub:<id>      -> "<code>"             # reverse index
+count:<code>  -> <int>               # referral count (atomic increment)
+done:<id>     -> 1                    # exactly-once idempotency marker
+lb:top        -> [ { code, alias, count }, ... ]   # leaderboard (top 50)
+rate:<ip>     -> { start, count }     # /referral rate-limit bucket
+```
+
+**`OutreachQueue`**:
+```
+opp:<id>      -> { id, createdAt, updatedAt,
+                   status,        # new|assigned|contacted|converted|dropped|rework
+                   platform, postUrl, topic, priority(1-3),
+                   assignedTo, assignedAt,
+                   outcome,       # pledged|subscribed|followed|none
+                   reworkCount, note, followedUp(bool) }
+roster        -> ["Alex","Sam", ...]  # on-duty staffers
+rotation      -> <int>                # round-robin pointer
 ```
 
 ## API surface (Cloudflare Worker)

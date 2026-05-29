@@ -19,7 +19,8 @@ Checklist of everything required to take this from repo → live.
 ## Decisions already made in this build
 
 - **Function host:** Cloudflare Worker (brief's preferred option over a SaaS).
-- **Referral state:** MailerLite custom fields + a non-PII KV index (no new
-  PII store; §6 satisfied).
+- **Referral state:** two strongly-consistent Durable Objects (opaque codes +
+  counts, public-post references) with MailerLite custom fields mirroring counts
+  — no new PII store; §6 satisfied.
 - **Counting policy:** referrers credited on **confirmation** only (double
   opt-in integrity).
