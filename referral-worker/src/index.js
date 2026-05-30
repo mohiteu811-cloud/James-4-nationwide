@@ -109,21 +109,40 @@ async function processConfirmedSubscriber(subscriberId, env) {
   const sub = await mlGetSubscriber(env, subscriberId);
   if (!sub) return { id: subscriberId, skipped: "not_found" };
 
+  // Re-verify against the *fetched* record. The webhook payload may omit
+  // `status` (so handleWebhook's guard can't catch it); checking here means a
+  // generic subscriber.updated/added event for an unconfirmed subscriber can
+  // never be credited — double opt-in holds regardless of which event fired.
+  if (sub.status !== "active") return { id: subscriberId, skipped: "not_active" };
+
+  // If a Pledgers group is configured, only credit members of it, so an
+  // account-level webhook can't turn a Weekly/Daily subscriber who never
+  // pledged into a referral participant.
+  if (env.PLEDGERS_GROUP_ID && Array.isArray(sub.groups)) {
+    const inGroup = sub.groups.some((g) => String(g.id) === String(env.PLEDGERS_GROUP_ID));
+    if (!inGroup) return { id: subscriberId, skipped: "not_in_pledgers_group" };
+  }
+
   const fields = sub.fields || {};
-  const { data: result } = await callDO(ledgerStub(env), "credit", {
+  const { status, data: result } = await callDO(ledgerStub(env), "credit", {
     subscriberId: sub.id,
     referredBy: (fields.referred_by || "").trim(),
     preferCode: fields.referral_code || "",
   });
+  // If the ledger did not accept the write (transient DO/storage failure, mint
+  // error), fail loudly so MailerLite retries — rather than stamping pledged_at
+  // over a no-op and losing the credit.
+  if (status >= 300 || !result || result.error) {
+    throw new Error(`ledger credit failed (${status})`);
+  }
 
   // Mirror to MailerLite for display/segmentation. Best-effort: the ledger is
-  // authoritative, so a failure here never loses or double-counts anything.
-  await safe(() =>
-    mlUpdateSubscriber(env, sub.id, {
-      referral_code: result.code,
-      pledged_at: today(),
-    })
-  );
+  // authoritative. Keep referral_code synced, but set pledged_at only on first
+  // processing so duplicate deliveries don't move the original pledge date.
+  const mirror = { referral_code: result.code };
+  if (!result.already) mirror.pledged_at = today();
+  await safe(() => mlUpdateSubscriber(env, sub.id, mirror));
+
   if (result.credited && result.credited.subscriberId && result.credited.referral_count != null) {
     await safe(() =>
       mlUpdateSubscriber(env, result.credited.subscriberId, {
@@ -160,10 +179,14 @@ async function handleReferralLookup(request, url, env) {
   // Lazy-mint (atomic in the DO) so the personal link works the instant they
   // hit thank-you, before the confirmation webhook runs. This does NOT seal
   // idempotency, so the webhook still credits the referrer on confirmation.
-  const { data } = await callDO(ledgerStub(env), "ensureCode", {
+  const { status, data } = await callDO(ledgerStub(env), "ensureCode", {
     subscriberId: sub.id,
     preferCode: (sub.fields || {}).referral_code || "",
   });
+  // If the ledger hiccuped, tell the page to keep polling rather than erroring.
+  if (status >= 300 || !data || data.error || !data.code) {
+    return json({ status: "pending" }, 202);
+  }
 
   return json({
     status: sub.status === "active" ? "confirmed" : "pending_confirmation",
@@ -302,7 +325,10 @@ export class ReferralLedger {
     const ref = (referredBy || "").trim();
     if (ref) {
       const refSub = await this.storage.get(`code:${ref}`);
-      if (refSub) {
+      if (refSub && String(refSub) === String(subscriberId)) {
+        // Someone reopened their own ?ref= link — don't let them recruit themselves.
+        credited = { code: ref, self: true };
+      } else if (refSub) {
         const next = (await this._count(ref)) + 1;
         await this.storage.put(`count:${ref}`, next);
         await this._bumpLeaderboard(ref, next);
@@ -348,23 +374,48 @@ export class ReferralLedger {
     }));
     let you = null;
     if (code) {
-      const idx = list.findIndex((e) => e.code === code);
-      if (idx >= 0) you = { rank: idx + 1, alias: list[idx].alias, count: list[idx].count };
+      // Compute rank from the full per-code counts, not the truncated top-50
+      // list, so supporters at rank 51+ still see their live rank.
+      const myCount = await this._count(code);
+      if (myCount > 0) {
+        const counts = await this.storage.list({ prefix: "count:" });
+        let ahead = 0;
+        for (const v of counts.values()) if (v > myCount) ahead += 1;
+        you = { rank: ahead + 1, alias: aliasFor(code), count: myCount };
+      }
     }
     return { top, you, total: list.length };
   }
 
   async _rate(ip) {
-    const key = `rate:${ip || "unknown"}`;
+    // Store a short, salted hash of the IP — never the raw address — and expire
+    // the buckets, so this never becomes a durable store of supporter IPs.
+    const key = `rate:${await hashId(ip)}`;
     const now = Date.now();
     let bucket = await this.storage.get(key);
     if (!bucket || now - bucket.start >= RATE_WINDOW_MS) bucket = { start: now, count: 0 };
     bucket.count += 1;
     await this.storage.put(key, bucket);
+    if (this.storage.setAlarm && this.storage.getAlarm) {
+      const pending = await this.storage.getAlarm();
+      if (!pending) await this.storage.setAlarm(now + RATE_WINDOW_MS);
+    }
     return {
       allowed: bucket.count <= RATE_MAX,
       retryAfter: Math.ceil((bucket.start + RATE_WINDOW_MS - now) / 1000),
     };
+  }
+
+  // Purge stale rate buckets so hashed-IP keys can't accumulate over time.
+  async alarm() {
+    const now = Date.now();
+    const buckets = await this.storage.list({ prefix: "rate:" });
+    let live = 0;
+    for (const [k, v] of buckets) {
+      if (!v || now - v.start >= RATE_WINDOW_MS) await this.storage.delete(k);
+      else live += 1;
+    }
+    if (live > 0 && this.storage.setAlarm) await this.storage.setAlarm(now + RATE_WINDOW_MS);
   }
 }
 
@@ -421,6 +472,11 @@ export class OutreachQueue {
     // follower counts / profiling fields, even if sent.
     if (!body.postUrl && !body.topic) {
       return json({ error: "postUrl_or_topic_required" }, 400);
+    }
+    // Only allow http(s) public-post links — blocks javascript:/data: URLs that
+    // could execute in the token-holding console origin if rendered.
+    if (body.postUrl && !/^https?:\/\//i.test(String(body.postUrl))) {
+      return json({ error: "invalid_post_url" }, 400);
     }
     const now = new Date().toISOString();
     const opp = {
@@ -598,6 +654,16 @@ function aliasFor(code) {
   }
   h = h >>> 0;
   return `${ALIAS_ADJ[h % ALIAS_ADJ.length]} ${ALIAS_NOUN[Math.floor(h / ALIAS_ADJ.length) % ALIAS_NOUN.length]}`;
+}
+
+// Short, salted hash of an identifier (used for rate-limit keys) so we never
+// persist a raw IP address.
+async function hashId(value) {
+  const data = new TextEncoder().encode(`j4n:${value || "unknown"}`);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return [...new Uint8Array(digest).slice(0, 8)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 /* -------------------------------------------------------------------------- */

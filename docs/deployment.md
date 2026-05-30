@@ -118,9 +118,18 @@ npm test                         # 13 tests against an in-memory MailerLite + Du
   webhook still credits the referrer on confirmation.
 - **Single-winner queue:** opportunity creation and claims are serialised in the
   `OutreachQueue` DO — no clobbered index, no two staffers on one item.
-- **Privacy:** `/referral` is rate-limited and returns the same `pending`
-  response for unknown and not-yet-visible emails, so it isn't a clean
-  pledged/not-pledged oracle.
+- **Privacy:** `/referral` is rate-limited (the bucket key is a salted hash of
+  the IP, auto-expired — no raw IPs are stored) and returns the same `pending`
+  response for unknown and not-yet-visible emails. **Residual:** a *confirmed*
+  pledger's existence is still testable at low volume by anyone who guesses
+  their email. Fully closing this needs a signed-token submit flow (the form
+  POST would proxy through the worker); rate-limiting is the accepted mitigation
+  for launch.
+- **Group-scoped credits:** set `PLEDGERS_GROUP_ID` (optional) so only confirmed
+  members of the Pledgers group are credited — defends against an account-level
+  webhook crediting Weekly/Daily subscribers.
+- **No self-referrals:** if `referred_by` resolves to the subscriber's own code,
+  the credit is skipped.
 
 ### Migrating existing pledgers (optional)
 If anyone already has a `referral_code` in MailerLite from before the ledger

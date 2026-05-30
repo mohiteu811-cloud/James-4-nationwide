@@ -25,6 +25,11 @@ new_sqlite_classes = ["ReferralLedger", "OutreachQueue"]
 # so the staffer console can run from anywhere.
 SITE_BASE_URL = "https://james4nationwide.co.uk"
 
+# Optional but recommended: the MailerLite Pledgers group ID. When set, only
+# confirmed members of that group are credited, so an account-level webhook
+# can't turn a Weekly/Daily subscriber into a referral participant.
+# PLEDGERS_GROUP_ID = "123456"
+
 # Secrets (DO NOT put these here — set them with `wrangler secret put`):
 #   MAILERLITE_API_TOKEN   MailerLite -> Integrations -> API (needs API access)
 #   WEBHOOK_SECRET         shared token appended to the webhook URL (?token=...)

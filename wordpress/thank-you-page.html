@@ -102,6 +102,10 @@
         })
         .then(function (data) {
           if (data && data.referral_link) {
+            // Remember the code so the /leaderboard page can highlight "You".
+            if (data.referral_code) {
+              try { localStorage.setItem("j4n_my_code", data.referral_code); } catch (e) {}
+            }
             render(data.referral_link, data.referral_count);
           } else if ((data && data._pending) || (data && data.status === "pending")) {
             if (attempt < 8) {

@@ -89,17 +89,29 @@
   (function () {
     // Capture ?ref=CODE and remember it across the double opt-in journey.
     var KEY = "j4n_ref";
+    var TTL_MS = 45 * 24 * 60 * 60 * 1000; // attribution window: 45 days
     try {
       var params = new URLSearchParams(window.location.search);
-      var ref = params.get("ref");
-      if (ref) {
-        ref = ref.trim().slice(0, 16);
-        if (ref) localStorage.setItem(KEY, ref);
+      var incoming = params.get("ref");
+      if (incoming) {
+        incoming = incoming.trim().slice(0, 16);
+        if (incoming) localStorage.setItem(KEY, JSON.stringify({ code: incoming, ts: Date.now() }));
       }
     } catch (e) {}
 
+    // Read the stored code, honouring the TTL. An old code left in localStorage
+    // (e.g. someone returns directly later, or on a shared device) is ignored
+    // and cleared, so a direct pledge isn't credited to a stale referrer.
     var ref = null;
-    try { ref = localStorage.getItem(KEY); } catch (e) {}
+    try {
+      var raw = localStorage.getItem(KEY);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (typeof parsed === "string") parsed = { code: parsed, ts: Date.now() }; // legacy format
+        if (parsed && parsed.code && Date.now() - (parsed.ts || 0) < TTL_MS) ref = parsed.code;
+        else localStorage.removeItem(KEY);
+      }
+    } catch (e) {}
     if (!ref) return;
 
     // Inject the referral code into the MailerLite form's referred_by field.
@@ -129,9 +141,13 @@
       observer.observe(document.body, { childList: true, subtree: true });
     }
     // Belt-and-braces: also inject right before any submit, in case the field
-    // was added after our last run.
+    // was added after our last run — then clear the stored code so a later
+    // direct pledge on this device isn't attributed to this referrer.
     document.addEventListener("submit", function (e) {
-      if (e.target && e.target.closest && e.target.closest(".j4n-form-wrap")) inject();
+      if (e.target && e.target.closest && e.target.closest(".j4n-form-wrap")) {
+        inject();
+        try { localStorage.removeItem(KEY); } catch (e2) {}
+      }
     }, true);
   })();
 </script>

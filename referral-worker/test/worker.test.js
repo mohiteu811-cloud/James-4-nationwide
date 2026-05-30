@@ -43,9 +43,10 @@ function makeEnv() {
   const byEmail = new Map();
   let nextId = 1000;
 
-  function addSubscriber({ email, status = "active", fields = {} }) {
+  function addSubscriber({ email, status = "active", fields = {}, groups }) {
     const id = String(nextId++);
     const sub = { id, email, status, fields: { ...fields } };
+    if (groups) sub.groups = groups;
     subscribers.set(id, sub);
     byEmail.set(email.toLowerCase(), id);
     return sub;
@@ -209,7 +210,85 @@ test("rate limiting kicks in on the public referral endpoint", async () => {
   assert.equal(last.status, 429);
 });
 
+test("a confirmation event for a still-unconfirmed subscriber is not credited", async () => {
+  const ctx = makeEnv();
+  const referrer = ctx.addSubscriber({ email: "r@example.com", fields: { referral_code: "STAT123" } });
+  await ctx.ledger("register", { subscriberId: referrer.id, code: "STAT123", count: 0 });
+  // Fetched record is unconfirmed even though the event claims active.
+  const newbie = ctx.addSubscriber({ email: "u@example.com", status: "unconfirmed", fields: { referred_by: "STAT123" } });
+
+  await call(ctx.env, "https://w/webhook?token=s3cret", {
+    method: "POST",
+    body: JSON.stringify({ events: [{ data: { subscriber: { id: newbie.id, status: "active" } } }] }),
+  });
+
+  const lb = await (await call(ctx.env, "https://w/leaderboard?code=STAT123")).json();
+  assert.equal(lb.you, null);
+});
+
+test("self-referrals are not credited", async () => {
+  const ctx = makeEnv();
+  const me = ctx.addSubscriber({ email: "me@example.com", status: "active" });
+  const code = (await (await call(ctx.env, "https://w/referral?email=me@example.com")).json()).referral_code;
+
+  // Reopen own ?ref= link and confirm with the same address.
+  me.fields.referred_by = code;
+  await call(ctx.env, "https://w/webhook?token=s3cret", {
+    method: "POST",
+    body: JSON.stringify({ events: [{ data: { subscriber: { id: me.id, status: "active" } } }] }),
+  });
+
+  const lb = await (await call(ctx.env, "https://w/leaderboard?code=" + code)).json();
+  assert.equal(lb.you, null); // count stayed 0
+});
+
+test("the Pledgers group restriction blocks non-members when configured", async () => {
+  const ctx = makeEnv();
+  ctx.env.PLEDGERS_GROUP_ID = "999";
+  const referrer = ctx.addSubscriber({ email: "r@example.com", fields: { referral_code: "GRP123" } });
+  await ctx.ledger("register", { subscriberId: referrer.id, code: "GRP123", count: 0 });
+
+  // Active subscriber, but only in the Weekly group (111), not Pledgers (999).
+  const outsider = ctx.addSubscriber({
+    email: "weekly@example.com",
+    status: "active",
+    fields: { referred_by: "GRP123" },
+    groups: [{ id: "111" }],
+  });
+  await call(ctx.env, "https://w/webhook?token=s3cret", {
+    method: "POST",
+    body: JSON.stringify({ events: [{ data: { subscriber: { id: outsider.id, status: "active" } } }] }),
+  });
+  assert.equal((await (await call(ctx.env, "https://w/leaderboard?code=GRP123")).json()).you, null);
+
+  // A real pledger in group 999 is credited.
+  const pledger = ctx.addSubscriber({
+    email: "pledger@example.com",
+    status: "active",
+    fields: { referred_by: "GRP123" },
+    groups: [{ id: "999" }],
+  });
+  await call(ctx.env, "https://w/webhook?token=s3cret", {
+    method: "POST",
+    body: JSON.stringify({ events: [{ data: { subscriber: { id: pledger.id, status: "active" } } }] }),
+  });
+  assert.equal((await (await call(ctx.env, "https://w/leaderboard?code=GRP123")).json()).you.count, 1);
+});
+
 /* ----------------------------- leaderboard ----------------------------- */
+
+test("a caller beyond the top 50 still gets their real rank", async () => {
+  const ctx = makeEnv();
+  for (let i = 1; i <= 55; i++) {
+    await ctx.ledger("register", { subscriberId: String(9000 + i), code: "C" + i, count: i });
+  }
+  // The referrer with count 1 sits at rank 55 — must not be null despite the
+  // top-50 display truncation.
+  const lb = await (await call(ctx.env, "https://w/leaderboard?code=C1")).json();
+  assert.equal(lb.top.length, 20);
+  assert.equal(lb.you.count, 1);
+  assert.equal(lb.you.rank, 55);
+});
 
 test("crediting a referrer puts them on the anonymised leaderboard", async () => {
   const ctx = makeEnv();
@@ -291,6 +370,22 @@ test("re-work is capped so it can never become repeat unsolicited contact", asyn
   const body = await (await staff(ctx.env, "/staff/opportunities/" + id, { method: "POST", body: JSON.stringify({ status: "rework" }) })).json();
   assert.equal(body.note, "rework_cap_reached_dropped");
   assert.equal(body.opportunity.status, "dropped");
+});
+
+test("opportunity creation rejects non-http(s) URLs (no javascript: links)", async () => {
+  const ctx = makeEnv();
+  const bad = await staff(ctx.env, "/staff/opportunities", {
+    method: "POST",
+    body: JSON.stringify({ topic: "x", postUrl: "javascript:alert(document.cookie)" }),
+  });
+  assert.equal(bad.status, 400);
+  assert.equal((await bad.json()).error, "invalid_post_url");
+
+  const ok = await staff(ctx.env, "/staff/opportunities", {
+    method: "POST",
+    body: JSON.stringify({ topic: "x", postUrl: "https://x.com/p/1" }),
+  });
+  assert.equal(ok.status, 201);
 });
 
 test("claim pulls the highest-priority item first and assigns it", async () => {
