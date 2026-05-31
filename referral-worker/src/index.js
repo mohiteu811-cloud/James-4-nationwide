@@ -21,10 +21,15 @@ const ML_API = "https://connect.mailerlite.com/api";
 
 // Unambiguous alphabet (no 0/O/1/I/L) so server-minted codes are easy to read
 // aloud / type. Browser-proposed codes use a wider URL-safe alphabet (they're
-// never read aloud), so accept any short URL-safe token when validating those.
+// never read aloud — they ride in links).
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 7;
-const CODE_RE = /^[A-Za-z0-9_-]{1,32}$/;
+// A browser-proposed code is only honoured if it looks like what genCode() in
+// pledge-page.html produces — 16 URL-safe chars (~90 bits). Anything shorter is
+// rejected and replaced by a server mint, so a hand-edited hidden form field
+// can't register a trivially guessable code and weaken the unguessable-bearer
+// assumption the public /leaderboard read relies on. (Codex review)
+const CODE_RE = /^[A-Za-z0-9_-]{16,64}$/;
 
 const OPP_STATUSES = ["new", "assigned", "contacted", "converted", "dropped", "rework"];
 const OPP_OUTCOMES = ["pledged", "subscribed", "followed", "none"];

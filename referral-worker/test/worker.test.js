@@ -112,20 +112,20 @@ const leaderboard = (ctx, code) =>
 test("the browser-generated referral_code is claimed on confirmation, then credited", async () => {
   const ctx = makeEnv();
   // Referrer confirms; the code their browser generated rides in on the form.
-  const ref = ctx.addSubscriber({ email: "ref@example.com", status: "active", fields: { referral_code: "alpha-code-01" } });
+  const ref = ctx.addSubscriber({ email: "ref@example.com", status: "active", fields: { referral_code: "alphacode0000001" } });
   await fireWebhook(ctx, ref.id);
-  assert.equal(ctx.subscribers.get(ref.id).fields.referral_code, "alpha-code-01"); // claimed, not replaced
+  assert.equal(ctx.subscribers.get(ref.id).fields.referral_code, "alphacode0000001"); // claimed, not replaced
   assert.ok(ctx.subscribers.get(ref.id).fields.pledged_at);
 
   // Referee pledges through that code and confirms — proving it was registered.
   const newbie = ctx.addSubscriber({
     email: "bob@example.com",
     status: "active",
-    fields: { referred_by: "alpha-code-01", referral_code: "bob-code-0001" },
+    fields: { referred_by: "alphacode0000001", referral_code: "bobcode000000001" },
   });
   await fireWebhook(ctx, newbie.id);
 
-  const lb = await leaderboard(ctx, "alpha-code-01");
+  const lb = await leaderboard(ctx, "alphacode0000001");
   assert.equal(lb.you.count, 1);
   assert.equal(ctx.subscribers.get(ref.id).fields.referral_count, 1); // mirrored to MailerLite
 });
@@ -200,40 +200,40 @@ test("out-of-order confirmation: a referee who confirms before the referrer is s
   const newbie = ctx.addSubscriber({
     email: "late@example.com",
     status: "active",
-    fields: { referred_by: "beta-code-99", referral_code: "newbie-code-1" },
+    fields: { referred_by: "betacode00000099", referral_code: "newbiecode000001" },
   });
   await fireWebhook(ctx, newbie.id);
   // Nothing credited yet — the referral is buffered, not lost.
-  assert.equal((await leaderboard(ctx, "beta-code-99")).you, null);
+  assert.equal((await leaderboard(ctx, "betacode00000099")).you, null);
 
   // Referrer confirms and registers the code — the buffer flushes.
-  const ref = ctx.addSubscriber({ email: "early@example.com", status: "active", fields: { referral_code: "beta-code-99" } });
+  const ref = ctx.addSubscriber({ email: "early@example.com", status: "active", fields: { referral_code: "betacode00000099" } });
   await fireWebhook(ctx, ref.id);
-  assert.equal((await leaderboard(ctx, "beta-code-99")).you.count, 1);
+  assert.equal((await leaderboard(ctx, "betacode00000099")).you.count, 1);
   assert.equal(ctx.subscribers.get(ref.id).fields.referral_count, 1); // mirrored
 
   // Re-delivering either webhook must not double-credit.
   await fireWebhook(ctx, ref.id);
   await fireWebhook(ctx, newbie.id);
-  assert.equal((await leaderboard(ctx, "beta-code-99")).you.count, 1);
+  assert.equal((await leaderboard(ctx, "betacode00000099")).you.count, 1);
 });
 
 test("a code collision is resolved first-write-wins; the loser gets a fresh minted code", async () => {
   const ctx = makeEnv();
-  const first = ctx.addSubscriber({ email: "first@example.com", status: "active", fields: { referral_code: "dup-code-007" } });
-  const second = ctx.addSubscriber({ email: "second@example.com", status: "active", fields: { referral_code: "dup-code-007" } });
+  const first = ctx.addSubscriber({ email: "first@example.com", status: "active", fields: { referral_code: "dupcode000000007" } });
+  const second = ctx.addSubscriber({ email: "second@example.com", status: "active", fields: { referral_code: "dupcode000000007" } });
   await fireWebhook(ctx, first.id);
   await fireWebhook(ctx, second.id);
 
-  assert.equal(ctx.subscribers.get(first.id).fields.referral_code, "dup-code-007"); // keeps it
+  assert.equal(ctx.subscribers.get(first.id).fields.referral_code, "dupcode000000007"); // keeps it
   const secondCode = ctx.subscribers.get(second.id).fields.referral_code;
-  assert.notEqual(secondCode, "dup-code-007");
+  assert.notEqual(secondCode, "dupcode000000007");
   assert.match(secondCode, /^[A-Z2-9]{7}$/); // server-minted replacement, mirrored back
 
   // The disputed code still belongs to the first claimant.
-  const newbie = ctx.addSubscriber({ email: "n@example.com", status: "active", fields: { referred_by: "dup-code-007" } });
+  const newbie = ctx.addSubscriber({ email: "n@example.com", status: "active", fields: { referred_by: "dupcode000000007" } });
   await fireWebhook(ctx, newbie.id);
-  assert.equal((await leaderboard(ctx, "dup-code-007")).you.count, 1);
+  assert.equal((await leaderboard(ctx, "dupcode000000007")).you.count, 1);
   assert.equal(ctx.subscribers.get(first.id).fields.referral_count, 1);
 });
 
@@ -247,6 +247,19 @@ test("a missing or invalid referral_code (old form / migration) is replaced by a
   assert.match(ctx.subscribers.get(noCode.id).fields.referral_code, /^[A-Z2-9]{7}$/);
   assert.match(ctx.subscribers.get(badCode.id).fields.referral_code, /^[A-Z2-9]{7}$/);
   assert.ok(ctx.subscribers.get(noCode.id).fields.pledged_at);
+});
+
+test("a too-short hand-edited referral_code is rejected and replaced by a minted one", async () => {
+  const ctx = makeEnv();
+  // Someone edits the hidden field to a trivially guessable value.
+  const s = ctx.addSubscriber({ email: "tamper@example.com", status: "active", fields: { referral_code: "A" } });
+  await fireWebhook(ctx, s.id);
+
+  const code = ctx.subscribers.get(s.id).fields.referral_code;
+  assert.notEqual(code, "A");
+  assert.match(code, /^[A-Z2-9]{7}$/); // server-minted, not the guessable proposal
+  // The guessable value was never registered, so it isn't a live leaderboard key.
+  assert.equal((await leaderboard(ctx, "A")).you, null);
 });
 
 test("rate limiting kicks in on the public leaderboard endpoint", async () => {
@@ -280,11 +293,11 @@ test("self-referrals are not credited", async () => {
   const me = ctx.addSubscriber({
     email: "me@example.com",
     status: "active",
-    fields: { referral_code: "my-own-code-1", referred_by: "my-own-code-1" },
+    fields: { referral_code: "myowncode0000001", referred_by: "myowncode0000001" },
   });
   await fireWebhook(ctx, me.id);
 
-  const lb = await leaderboard(ctx, "my-own-code-1");
+  const lb = await leaderboard(ctx, "myowncode0000001");
   assert.equal(lb.you, null); // count stayed 0
 });
 

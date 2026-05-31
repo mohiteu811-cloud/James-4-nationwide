@@ -121,6 +121,7 @@
     } catch (e) {}
 
     /* ---- 2. This browser's OWN referral code ---- */
+    var myCodeCache = null; // one stable code per page load (survives storage being blocked)
     // Generated in the browser (so the email never reaches our backend) with
     // ~80 bits of entropy, URL-safe. Created ONCE and reused forever —
     // regenerating would orphan links already shared. Minted lazily at submit
@@ -134,11 +135,18 @@
       return out;
     }
     function myCode(create) {
+      if (myCodeCache) return myCodeCache;
       var code = null;
       try { code = localStorage.getItem(MY_KEY); } catch (e) {}
       if (!code && create) {
-        try { code = genCode(); localStorage.setItem(MY_KEY, code); } catch (e) { code = null; }
+        try { code = genCode(); } catch (e) { return null; } // no crypto: let the server mint one
+        // Persist best-effort. If storage is blocked (private mode, quota), we
+        // STILL submit the freshly generated code so it rides through MailerLite
+        // into the mirror + confirmation-email link — the share link works even
+        // though this device can't later show it on the thank-you page.
+        try { localStorage.setItem(MY_KEY, code); } catch (e) {}
       }
+      if (code) myCodeCache = code; // stable for the page's lifetime, even if unpersisted
       return code;
     }
 
