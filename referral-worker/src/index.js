@@ -19,18 +19,26 @@
 
 const ML_API = "https://connect.mailerlite.com/api";
 
-// Unambiguous alphabet (no 0/O/1/I/L) so codes are easy to read aloud / type.
+// Unambiguous alphabet (no 0/O/1/I/L) so server-minted codes are easy to read
+// aloud / type. Browser-proposed codes use a wider URL-safe alphabet (they're
+// never read aloud), so accept any short URL-safe token when validating those.
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 7;
+const CODE_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
 const OPP_STATUSES = ["new", "assigned", "contacted", "converted", "dropped", "rework"];
 const OPP_OUTCOMES = ["pledged", "subscribed", "followed", "none"];
 const MAX_REWORK = 2; // guardrail: cap re-attempts so re-work never becomes spam
 
-// /referral is a public, email-keyed endpoint, so rate-limit it to make
-// enumeration impractical (Codex review #7 mitigation).
+// /leaderboard is the public read endpoint (live count + rank by referral
+// code). Rate-limit it so the single ledger DO can't be hammered and so the
+// code-validity response can't be brute-forced (Codex review #7).
 const RATE_WINDOW_MS = 10 * 60 * 1000;
 const RATE_MAX = 30;
+
+// Out-of-order referral buffers expire after the 45-day attribution window so
+// abandoned entries (referrer never confirmed) can't accumulate.
+const PENDING_TTL_MS = 45 * 24 * 60 * 60 * 1000;
 
 /* ========================================================================== */
 /* Worker (router)                                                            */
@@ -49,11 +57,8 @@ export default {
       if (pathname === "/webhook" && request.method === "POST") {
         return await handleWebhook(request, env); // server-to-server, no CORS
       }
-      if (pathname === "/referral" && request.method === "GET") {
-        return applyCors(env, request, await handleReferralLookup(request, url, env));
-      }
       if (pathname === "/leaderboard" && request.method === "GET") {
-        return applyCors(env, request, await handleLeaderboard(url, env));
+        return applyCors(env, request, await handleLeaderboard(request, url, env));
       }
       if (pathname.startsWith("/staff/")) {
         return applyCors(env, request, await handleStaff(request, url, env));
@@ -137,12 +142,16 @@ async function processConfirmedSubscriber(subscriberId, env) {
   }
 
   // Mirror to MailerLite for display/segmentation. Best-effort: the ledger is
-  // authoritative. Keep referral_code synced, but set pledged_at only on first
-  // processing so duplicate deliveries don't move the original pledge date.
+  // authoritative. Keep referral_code synced — this also corrects the rare
+  // collision case where the ledger had to mint a replacement for the code the
+  // browser proposed — but set pledged_at only on first processing so duplicate
+  // deliveries don't move the original pledge date.
   const mirror = { referral_code: result.code };
   if (!result.already) mirror.pledged_at = today();
   await safe(() => mlUpdateSubscriber(env, sub.id, mirror));
 
+  // Mirror the credited referrer's new count (the subscriber named in this
+  // subscriber's referred_by).
   if (result.credited && result.credited.subscriberId && result.credited.referral_count != null) {
     await safe(() =>
       mlUpdateSubscriber(env, result.credited.subscriberId, {
@@ -151,52 +160,32 @@ async function processConfirmedSubscriber(subscriberId, env) {
     );
   }
 
+  // This confirmation may also have flushed a pending buffer — i.e. referees who
+  // confirmed *before* this subscriber registered their own code now get
+  // credited to this subscriber. Mirror this subscriber's own updated count too.
+  if (result.flushedDelta && result.code) {
+    await safe(() =>
+      mlUpdateSubscriber(env, sub.id, { referral_count: result.selfCount })
+    );
+  }
+
   return { id: subscriberId, ...result };
 }
 
 /* -------------------------------------------------------------------------- */
-/* Read endpoint: thank-you page link + live count                            */
+/* Read endpoint: anonymised leaderboard + the caller's own live count/rank.  */
+/* The caller passes their referral *code* (a bearer capability they already   */
+/* hold) — never an email — so this endpoint reveals nothing about anyone but  */
+/* the code-holder, and there is no email→data oracle anywhere in the backend. */
 /* -------------------------------------------------------------------------- */
 
-async function handleReferralLookup(request, url, env) {
+async function handleLeaderboard(request, url, env) {
   const ip = request.headers.get("cf-connecting-ip") || "unknown";
   const { data: rate } = await callDO(ledgerStub(env), "rate", { ip });
   if (!rate.allowed) {
     return json({ error: "rate_limited" }, 429, { "Retry-After": String(rate.retryAfter || 60) });
   }
 
-  const email = (url.searchParams.get("email") || "").trim().toLowerCase();
-  if (!email || !email.includes("@")) {
-    return json({ error: "email_required" }, 400);
-  }
-
-  const sub = await mlGetSubscriber(env, email);
-  // Collapse "not a subscriber" into the same "pending" response as
-  // "just submitted, not visible yet" so the endpoint isn't a clean
-  // pledged/not-pledged oracle, and so the page polls in both cases.
-  if (!sub) return json({ status: "pending" }, 202);
-
-  // Lazy-mint (atomic in the DO) so the personal link works the instant they
-  // hit thank-you, before the confirmation webhook runs. This does NOT seal
-  // idempotency, so the webhook still credits the referrer on confirmation.
-  const { status, data } = await callDO(ledgerStub(env), "ensureCode", {
-    subscriberId: sub.id,
-    preferCode: (sub.fields || {}).referral_code || "",
-  });
-  // If the ledger hiccuped, tell the page to keep polling rather than erroring.
-  if (status >= 300 || !data || data.error || !data.code) {
-    return json({ status: "pending" }, 202);
-  }
-
-  return json({
-    status: sub.status === "active" ? "confirmed" : "pending_confirmation",
-    referral_code: data.code,
-    referral_count: data.count,
-    referral_link: `${shareBase(env)}/pledge/?ref=${data.code}`,
-  });
-}
-
-async function handleLeaderboard(url, env) {
   const limit = clamp(parseInt(url.searchParams.get("limit"), 10) || 20, 1, 50);
   const code = (url.searchParams.get("code") || "").trim();
   const { data } = await callDO(ledgerStub(env), "leaderboard", { limit, code });
@@ -267,10 +256,8 @@ export class ReferralLedger {
     const body = await request.json().catch(() => ({}));
     try {
       switch (action) {
-        case "ensureCode": {
-          const code = await this._ensureCode(body.subscriberId, body.preferCode);
-          return json({ code, count: await this._count(code) });
-        }
+        case "registerSelf":
+          return json(await this._registerSelf(body));
         case "credit":
           return json(await this._credit(body));
         case "register":
@@ -288,36 +275,101 @@ export class ReferralLedger {
     }
   }
 
-  async _ensureCode(subscriberId, preferCode) {
+  /**
+   * Register the confirming subscriber's *own* referral code. The code is
+   * proposed by the subscriber's browser (carried through MailerLite as the
+   * `referral_code` field) so the email never reaches this backend. First write
+   * wins: if the proposed code is already taken (astronomically unlikely for an
+   * 80-bit random code) or is missing/invalid (old form, migration), we mint a
+   * replacement and flag `replaced` so the caller can correct MailerLite.
+   *
+   * Idempotent: a subscriber already holding a code keeps it. Either way we then
+   * flush any referees who confirmed *before* this code existed (see _credit).
+   */
+  async _registerSelf({ subscriberId, preferCode }) {
     const subKey = `sub:${subscriberId}`;
-    const existing = await this.storage.get(subKey);
-    if (existing) return existing;
+    let code = await this.storage.get(subKey);
+    let replaced = false;
 
-    // Reuse a code already minted in MailerLite (e.g. migrated/seed subscribers)
-    // so the ledger and MailerLite stay consistent.
-    if (preferCode && !(await this.storage.get(`code:${preferCode}`))) {
-      await this.storage.put(`code:${preferCode}`, String(subscriberId));
-      await this.storage.put(subKey, preferCode);
-      return preferCode;
-    }
-    for (let i = 0; i < 6; i++) {
-      const code = randomCode();
-      if (await this.storage.get(`code:${code}`)) continue; // collision
+    if (!code) {
+      const wanted = String(preferCode || "");
+      if (CODE_RE.test(wanted) && !(await this.storage.get(`code:${wanted}`))) {
+        code = wanted;
+      } else {
+        // No usable proposal (missing/invalid) or a collision with an existing
+        // holder. Mint a fresh unique code; flag replaced only when the browser
+        // actually proposed something, so the caller knows to overwrite it.
+        if (wanted) replaced = true;
+        code = await this._mint();
+      }
       await this.storage.put(`code:${code}`, String(subscriberId));
       await this.storage.put(subKey, code);
-      return code;
+    }
+
+    const flushedDelta = await this._flushPending(code, subscriberId);
+    return { code, replaced, flushedDelta, selfCount: await this._count(code) };
+  }
+
+  async _mint() {
+    for (let i = 0; i < 8; i++) {
+      const code = randomCode();
+      if (!(await this.storage.get(`code:${code}`))) return code; // free
     }
     throw new Error("could not mint a unique referral code");
   }
 
+  // Buffer a referee who confirmed before their referrer registered the code, so
+  // no credit is lost to confirmation ordering. Deduped per code.
+  async _addPending(refCode, subscriberId) {
+    const key = `pending:${refCode}`;
+    const pend = (await this.storage.get(key)) || { ids: [], ts: Date.now() };
+    const id = String(subscriberId);
+    if (!pend.ids.includes(id)) pend.ids.push(id);
+    await this.storage.put(key, pend);
+    if (this.storage.setAlarm && this.storage.getAlarm) {
+      const armed = await this.storage.getAlarm();
+      if (!armed) await this.storage.setAlarm(Date.now() + RATE_WINDOW_MS);
+    }
+  }
+
+  // Credit every buffered referee for this code, exactly once (the flushed:
+  // guard survives re-deliveries), then clear the buffer. Returns how many were
+  // newly credited so the worker can mirror the new count to MailerLite.
+  async _flushPending(code, subscriberId) {
+    const key = `pending:${code}`;
+    const pend = await this.storage.get(key);
+    if (!pend || !Array.isArray(pend.ids) || !pend.ids.length) return 0;
+
+    let delta = 0;
+    for (const refereeId of pend.ids) {
+      if (String(refereeId) === String(subscriberId)) continue; // never self-credit
+      const fKey = `flushed:${code}:${refereeId}`;
+      if (await this.storage.get(fKey)) continue; // already credited
+      await this.storage.put(fKey, 1);
+      delta += 1;
+    }
+    if (delta > 0) {
+      const next = (await this._count(code)) + delta;
+      await this.storage.put(`count:${code}`, next);
+      await this._bumpLeaderboard(code, next);
+    }
+    await this.storage.delete(key);
+    return delta;
+  }
+
   async _credit({ subscriberId, referredBy, preferCode }) {
     const doneKey = `done:${subscriberId}`;
-    const code = await this._ensureCode(subscriberId, preferCode);
+    // Claim the subscriber's own code (first-write-wins, mint-on-collision) and
+    // flush anyone who confirmed ahead of them.
+    const self = await this._registerSelf({ subscriberId, preferCode });
+    const code = self.code;
+    const meta = { replaced: self.replaced, flushedDelta: self.flushedDelta, selfCount: self.selfCount };
 
     // Exactly-once: if we've already processed this confirmation, do not credit
-    // again (handles webhook retries + self-triggered subscriber.updated).
+    // the referrer again (handles webhook retries + self-triggered
+    // subscriber.updated). The pending flush above is independently idempotent.
     if (await this.storage.get(doneKey)) {
-      return { code, credited: null, already: true };
+      return { code, credited: null, already: true, ...meta };
     }
     await this.storage.put(doneKey, 1);
 
@@ -334,10 +386,13 @@ export class ReferralLedger {
         await this._bumpLeaderboard(ref, next);
         credited = { code: ref, subscriberId: refSub, referral_count: next };
       } else {
-        credited = { code: ref, found: false };
+        // Referrer hasn't confirmed yet — buffer so they're credited the moment
+        // they do, instead of dropping the referral (Codex review: lost credits).
+        await this._addPending(ref, subscriberId);
+        credited = { code: ref, pending: true };
       }
     }
-    return { code, credited };
+    return { code, credited, ...meta };
   }
 
   // Migration/seed helper: import an existing pledger's code (and count) so
@@ -406,15 +461,25 @@ export class ReferralLedger {
     };
   }
 
-  // Purge stale rate buckets so hashed-IP keys can't accumulate over time.
+  // Purge stale rate buckets (so hashed-IP keys can't accumulate) and abandoned
+  // pending buffers (referrers who never confirmed within the attribution
+  // window), so neither becomes an unbounded store.
   async alarm() {
     const now = Date.now();
-    const buckets = await this.storage.list({ prefix: "rate:" });
     let live = 0;
+
+    const buckets = await this.storage.list({ prefix: "rate:" });
     for (const [k, v] of buckets) {
       if (!v || now - v.start >= RATE_WINDOW_MS) await this.storage.delete(k);
       else live += 1;
     }
+
+    const pending = await this.storage.list({ prefix: "pending:" });
+    for (const [k, v] of pending) {
+      if (!v || now - (v.ts || 0) >= PENDING_TTL_MS) await this.storage.delete(k);
+      else live += 1;
+    }
+
     if (live > 0 && this.storage.setAlarm) await this.storage.setAlarm(now + RATE_WINDOW_MS);
   }
 }

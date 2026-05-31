@@ -27,8 +27,11 @@ the staffer console to Cloudflare Pages.
 
 ## 2. MailerLite
 - [ ] Create the `Pledgers` group + custom fields (see `docs/mailerlite-setup.md`).
-- [ ] Build the embedded pledge form (with a hidden `referred_by` field), set its
-      success redirect to `https://james4nationwide.co.uk/thank-you/?email={$email}`.
+- [ ] Build the embedded pledge form with hidden `referred_by` **and**
+      `referral_code` fields; set its success redirect to the plain
+      `https://james4nationwide.co.uk/thank-you/` (no `?email=`).
+- [ ] Put the personal link `…/pledge/?ref={$referral_code}` in the
+      confirmation/welcome email (so cross-device confirmers get it).
 - [ ] Add the webhook: `https://<WORKER_BASE>/webhook?token=<WEBHOOK_SECRET>`,
       event = subscriber confirmed/updated.
 - [ ] Author + schedule the 5 reminder emails (and the seed broadcast) from `emails/`.

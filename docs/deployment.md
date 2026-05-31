@@ -43,8 +43,8 @@ Generate a good secret with: `openssl rand -hex 24`
 ## 4. (Optional) set the site origin
 
 `SITE_BASE_URL` in `wrangler.toml` defaults to `https://james4nationwide.co.uk`.
-It is used to build share links and to lock CORS on the public endpoints
-(`/referral`, `/leaderboard`). Change it only if the domain differs. The
+It is used to build share links and to lock CORS on the public `/leaderboard`
+endpoint. Change it only if the domain differs. The
 `/staff/*` endpoints reflect the request origin instead (they are
 token-authenticated and credential-less), so the staffer console works whether
 it is hosted elsewhere or opened locally.
@@ -63,7 +63,11 @@ Cloudflare dashboard.)
 ## 6. Wire it up
 
 - **Thank-you page:** in `wordpress/thank-you-page.html`, replace `WORKER_BASE`
-  with the deployed worker URL.
+  with the deployed worker URL. Set the MailerLite form's after-submit redirect
+  to the plain `…/thank-you/` URL (no `?email=` — the link comes from the code
+  stored in the browser).
+- **Pledge form:** add hidden `referred_by` **and** `referral_code` fields, and
+  put the personal link in the confirmation email (see `docs/mailerlite-setup.md`).
 - **MailerLite webhook:** point it at
   `https://<worker-domain>/webhook?token=<WEBHOOK_SECRET>` (see
   `docs/mailerlite-setup.md` §6).
@@ -72,9 +76,8 @@ Cloudflare dashboard.)
 
 | Method | Path                         | Purpose                                            |
 |--------|------------------------------|----------------------------------------------------|
-| POST   | `/webhook?token=…`           | MailerLite confirmation → mint code, credit referrer |
-| GET    | `/referral?email=…`          | Thank-you page → personal link + live count        |
-| GET    | `/leaderboard?code=&limit=`  | Public arcade leaderboard (aliases + caller's rank)|
+| POST   | `/webhook?token=…`           | MailerLite confirmation → register code, credit referrer |
+| GET    | `/leaderboard?code=&limit=`  | Public: anonymised leaderboard + caller's own live count/rank (by referral code). Rate-limited. |
 | POST   | `/staff/opportunities`       | Staff: add an opportunity (public post)            |
 | GET    | `/staff/opportunities?status=&assignedTo=` | Staff: queue view                    |
 | POST   | `/staff/claim`               | Staff: self-claim next new/rework item             |
@@ -100,7 +103,7 @@ The leaderboard is public but CORS-locked to `SITE_BASE_URL`.
 ```bash
 cp .dev.vars.example .dev.vars   # fill in values
 npm run dev                      # wrangler dev
-npm test                         # 13 tests against an in-memory MailerLite + Durable Objects
+npm test                         # in-memory tests against a fake MailerLite + Durable Objects
 ```
 
 ## How it behaves (and why)
@@ -112,19 +115,27 @@ npm test                         # 13 tests against an in-memory MailerLite + Du
   authoritative; MailerLite fields are a best-effort display mirror).
 - **Double-opt-in safe:** referrers are credited only when the new subscriber's
   status is `active` — unconfirmed signups never inflate a count.
-- **Instant, lag-free link:** `/referral` lazily mints a code in the DO
-  (strongly consistent, so a just-minted referrer code is immediately creditable
-  with no KV propagation delay). Lazy mint does not seal idempotency, so the
-  webhook still credits the referrer on confirmation.
+- **Instant, lag-free link — and no email on the backend:** each supporter's
+  referral code is generated **in their browser** on the pledge page and carried
+  through MailerLite as the `referral_code` field. The thank-you page reads the
+  same code from local storage and shows the share link instantly, with no
+  backend call. On confirmation the ledger registers that code (first-write-wins,
+  minting a replacement on the astronomically unlikely collision) and credits the
+  referrer. Because the email never reaches the worker, there is **no
+  email→data lookup and no email-enumeration oracle** (Codex review #7).
+- **No lost credits on out-of-order confirmation:** if a referee confirms before
+  their referrer, the credit is buffered (`pending:`) and flushed exactly-once
+  the moment the referrer registers their code — never dropped.
 - **Single-winner queue:** opportunity creation and claims are serialised in the
   `OutreachQueue` DO — no clobbered index, no two staffers on one item.
-- **Privacy:** `/referral` is rate-limited (the bucket key is a salted hash of
-  the IP, auto-expired — no raw IPs are stored) and returns the same `pending`
-  response for unknown and not-yet-visible emails. **Residual:** a *confirmed*
-  pledger's existence is still testable at low volume by anyone who guesses
-  their email. Fully closing this needs a signed-token submit flow (the form
-  POST would proxy through the worker); rate-limiting is the accepted mitigation
-  for launch.
+- **Privacy:** the only public read endpoint, `/leaderboard`, takes a referral
+  *code* (a bearer capability the visitor already holds), never an email, and
+  returns only anonymised aliases + counts. It is rate-limited (the bucket key is
+  a salted hash of the IP, auto-expired — no raw IPs are stored). **Residual:** a
+  valid code returns a `you` object and an invalid one returns `null`, so it is a
+  code-validity oracle — but codes are unguessable (~80 bits) and leak no PII, and
+  rate-limiting blunts brute force. The email-enumeration oracle is **eliminated**,
+  not merely mitigated.
 - **Group-scoped credits:** set `PLEDGERS_GROUP_ID` (optional) so only confirmed
   members of the Pledgers group are credited — defends against an account-level
   webhook crediting Weekly/Daily subscribers.
@@ -135,4 +146,5 @@ npm test                         # 13 tests against an in-memory MailerLite + Du
 If anyone already has a `referral_code` in MailerLite from before the ledger
 existed, register it so their shared links keep crediting:
 `POST` to the `ReferralLedger` `register` action with `{ subscriberId, code, count }`.
-New pledgers need nothing — their code is minted on first confirmation.
+New pledgers need nothing — their browser proposes a code and the ledger
+registers it on first confirmation (minting one if the field is empty).

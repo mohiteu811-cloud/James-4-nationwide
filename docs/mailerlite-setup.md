@@ -37,17 +37,36 @@ everything else binds to. ~1 hour, and it starts capturing pledges immediately
 
 - **Forms → Embedded forms → Create**, subscribing to **Pledgers**.
 - Fields: **Email** (required), optional **Name**.
-- Add a **hidden field** mapped to `referred_by`. (If the builder won't allow a
-  hidden field, the script on the pledge page creates the `fields[referred_by]`
-  input itself — see `wordpress/pledge-page.html`.)
+- Add **two hidden fields**, mapped to `referred_by` **and** `referral_code`.
+  (If the builder won't allow hidden fields, the script on the pledge page
+  creates the `fields[referred_by]` and `fields[referral_code]` inputs itself —
+  see `wordpress/pledge-page.html`.) The `referral_code` value is generated **in
+  the subscriber's browser**, so their email never reaches our backend and there
+  is no way to look anyone up by email.
 - Optionally set a hidden `source` default of `pledge_page`.
-- **After-submit / success action:** redirect to
-  `https://james4nationwide.co.uk/thank-you/?email={$email}` so the thank-you
-  page can show the personal link + count.
+- **After-submit / success action:** redirect to the **plain**
+  `https://james4nationwide.co.uk/thank-you/` URL — **no `?email=`**. The
+  thank-you page reads the referral code from the browser and shows the personal
+  link instantly, with no backend lookup.
 - Copy the form embed HTML into the `<!-- MAILERLITE FORM -->` slot in
   `wordpress/pledge-page.html`.
 
-## 5. Confirm the email footer
+## 5. Put the personal share link in the confirmation/welcome email
+
+Because the thank-you page reads the referral code from the **browser**, a
+subscriber who confirms on a *different device* (e.g. clicks the confirmation
+link on their phone) wouldn't otherwise see their link. So include it in the
+double-opt-in confirmation (or the welcome) email:
+
+> Share your personal link:
+> `https://james4nationwide.co.uk/pledge/?ref={$referral_code}`
+
+Use MailerLite's merge tag for the `referral_code` field (shown as
+`{$referral_code}` above — confirm the exact tag under Fields). The value is
+populated from the hidden form field at submit time, so it's available in the
+confirmation email.
+
+## 5b. Confirm the email footer
 
 Check the default footer reads (§5):
 

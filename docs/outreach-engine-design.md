@@ -55,12 +55,14 @@ private profiles):
 
 **`ReferralLedger`** (authoritative; MailerLite fields mirror it for display):
 ```
-code:<code>   -> "<subscriberId>"     # code index (atomic mint, no KV lag)
+code:<code>   -> "<subscriberId>"     # code index (browser-proposed, first-write-wins)
 sub:<id>      -> "<code>"             # reverse index
 count:<code>  -> <int>               # referral count (atomic increment)
-done:<id>     -> 1                    # exactly-once idempotency marker
+done:<id>     -> 1                    # exactly-once: referrer credited for this referee
+pending:<code> -> { ids:[...], ts }   # referees who confirmed before the referrer
+flushed:<code>:<id> -> 1             # exactly-once flush guard for a buffered referee
 lb:top        -> [ { code, alias, count }, ... ]   # leaderboard (top 50)
-rate:<ip>     -> { start, count }     # /referral rate-limit bucket
+rate:<hash>   -> { start, count }     # /leaderboard rate-limit bucket (salted-hash IP)
 ```
 
 **`OutreachQueue`**:

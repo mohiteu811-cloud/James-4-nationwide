@@ -4,11 +4,16 @@
   WHAT YOU MUST DO:
   1. Replace the <!-- MAILERLITE FORM --> block with your MailerLite embedded
      form for the Pledgers group (Forms -> Embedded form -> copy the HTML).
-  2. In MailerLite, add a HIDDEN field to that form mapped to the custom field
-     `referred_by`. Its <input> will be named  fields[referred_by]  — the script
-     at the bottom finds it automatically. If you cannot add a hidden field in
-     the builder, the script creates one for you.
+  2. In MailerLite, add TWO HIDDEN fields to that form, mapped to the custom
+     fields `referred_by` and `referral_code`. Their <input>s will be named
+     fields[referred_by] and fields[referral_code] — the script at the bottom
+     finds them automatically (and creates them if the builder won't let you).
   3. Keep double opt-in ON for the Pledgers group (Build Brief §6).
+
+  PRIVACY: the subscriber's own referral code is generated *in the browser* and
+  carried through the form, so their email never reaches our backend and there
+  is no way to look anyone up by email. The thank-you page reads the same code
+  from this browser to show the share link instantly.
 
   Accessibility: large tap targets, high-contrast text, AA colour contrast —
   the audience skews older (§7.6).
@@ -87,66 +92,96 @@
 
 <script>
   (function () {
-    // Capture ?ref=CODE and remember it across the double opt-in journey.
-    var KEY = "j4n_ref";
+    var REF_KEY = "j4n_ref";       // the referrer who sent me here (if any)
+    var MY_KEY = "j4n_my_code";    // THIS browser's own referral code
     var TTL_MS = 45 * 24 * 60 * 60 * 1000; // attribution window: 45 days
+
+    /* ---- 1. Capture an incoming ?ref=CODE (my referrer) ---- */
     try {
       var params = new URLSearchParams(window.location.search);
       var incoming = params.get("ref");
       if (incoming) {
-        incoming = incoming.trim().slice(0, 16);
-        if (incoming) localStorage.setItem(KEY, JSON.stringify({ code: incoming, ts: Date.now() }));
+        incoming = incoming.trim().slice(0, 32);
+        if (incoming) localStorage.setItem(REF_KEY, JSON.stringify({ code: incoming, ts: Date.now() }));
       }
     } catch (e) {}
 
-    // Read the stored code, honouring the TTL. An old code left in localStorage
-    // (e.g. someone returns directly later, or on a shared device) is ignored
-    // and cleared, so a direct pledge isn't credited to a stale referrer.
+    // Read the stored referrer code, honouring the TTL. An old code left in
+    // localStorage (someone returns directly later, or a shared device) is
+    // ignored and cleared, so a direct pledge isn't credited to a stale referrer.
     var ref = null;
     try {
-      var raw = localStorage.getItem(KEY);
+      var raw = localStorage.getItem(REF_KEY);
       if (raw) {
         var parsed = JSON.parse(raw);
         if (typeof parsed === "string") parsed = { code: parsed, ts: Date.now() }; // legacy format
         if (parsed && parsed.code && Date.now() - (parsed.ts || 0) < TTL_MS) ref = parsed.code;
-        else localStorage.removeItem(KEY);
+        else localStorage.removeItem(REF_KEY);
       }
     } catch (e) {}
-    if (!ref) return;
 
-    // Inject the referral code into the MailerLite form's referred_by field.
-    function inject() {
+    /* ---- 2. This browser's OWN referral code ---- */
+    // Generated in the browser (so the email never reaches our backend) with
+    // ~80 bits of entropy, URL-safe. Created ONCE and reused forever —
+    // regenerating would orphan links already shared. Minted lazily at submit
+    // so an idle visitor who never pledges never gets one.
+    function genCode() {
+      var alphabet = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789-_";
+      var buf = new Uint8Array(16);
+      (window.crypto || window.msCrypto).getRandomValues(buf);
+      var out = "";
+      for (var i = 0; i < buf.length; i++) out += alphabet[buf[i] % alphabet.length];
+      return out;
+    }
+    function myCode(create) {
+      var code = null;
+      try { code = localStorage.getItem(MY_KEY); } catch (e) {}
+      if (!code && create) {
+        try { code = genCode(); localStorage.setItem(MY_KEY, code); } catch (e) { code = null; }
+      }
+      return code;
+    }
+
+    /* ---- 3. Inject both fields into the MailerLite form ---- */
+    function setField(form, name, value) {
+      var input = form.querySelector('[name="' + name + '"]');
+      if (!input) {
+        input = document.createElement("input");
+        input.type = "hidden";
+        input.name = name;
+        form.appendChild(input);
+      }
+      input.value = value;
+    }
+    // create=false before submit (don't mint a code for someone just browsing);
+    // create=true on submit (guarantee the code exists by the time they pledge).
+    function inject(create) {
       var forms = document.querySelectorAll(".j4n-form-wrap form");
       forms.forEach(function (form) {
-        var input = form.querySelector('[name="fields[referred_by]"]');
-        if (!input) {
-          input = document.createElement("input");
-          input.type = "hidden";
-          input.name = "fields[referred_by]";
-          form.appendChild(input);
-        }
-        input.value = ref;
+        var mine = myCode(create);
+        if (mine) setField(form, "fields[referral_code]", mine);
+        if (ref) setField(form, "fields[referred_by]", ref);
       });
     }
 
-    if (document.readyState !== "loading") inject();
-    else document.addEventListener("DOMContentLoaded", inject);
+    if (document.readyState !== "loading") inject(false);
+    else document.addEventListener("DOMContentLoaded", function () { inject(false); });
 
     // The MailerLite embed is a third-party async form that can appear at any
     // time (slow mobile, deferred scripts). A MutationObserver keeps watching
     // for the whole life of the page instead of giving up after a few seconds,
-    // so late-rendered forms still carry referred_by.
+    // so late-rendered forms still carry the fields.
     if (window.MutationObserver) {
-      var observer = new MutationObserver(function () { inject(); });
+      var observer = new MutationObserver(function () { inject(false); });
       observer.observe(document.body, { childList: true, subtree: true });
     }
-    // Belt-and-braces: also inject right before any submit, in case the field
-    // was added after our last run — then clear the stored code so a later
-    // direct pledge on this device isn't attributed to this referrer.
+    // Belt-and-braces: mint (if needed) and inject right before any submit, then
+    // clear the stored referrer so a later direct pledge on this device isn't
+    // attributed to it. The browser's own code (MY_KEY) is kept forever.
     document.addEventListener("submit", function (e) {
       if (e.target && e.target.closest && e.target.closest(".j4n-form-wrap")) {
-        inject();
-        try { localStorage.removeItem(KEY); } catch (e2) {}
+        inject(true);
+        try { localStorage.removeItem(REF_KEY); } catch (e2) {}
       }
     }, true);
   })();

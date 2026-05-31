@@ -97,32 +97,44 @@ function resp(status, body) {
 
 const call = (env, url, init) => worker.fetch(new Request(url, init), env, {});
 
-/* ------------------------------- referral ------------------------------ */
+// Fire a MailerLite "subscriber confirmed" webhook for one subscriber id.
+const fireWebhook = (ctx, id, status = "active") =>
+  call(ctx.env, "https://w/webhook?token=s3cret", {
+    method: "POST",
+    body: JSON.stringify({ events: [{ data: { subscriber: { id, status } } }] }),
+  });
 
-test("lookup lazily mints a stable code and a working link, without sealing", async () => {
+const leaderboard = (ctx, code) =>
+  call(ctx.env, "https://w/leaderboard?code=" + encodeURIComponent(code)).then((r) => r.json());
+
+/* ----------------------------- referral flow ---------------------------- */
+
+test("the browser-generated referral_code is claimed on confirmation, then credited", async () => {
   const ctx = makeEnv();
-  ctx.addSubscriber({ email: "alice@example.com", status: "unconfirmed" });
+  // Referrer confirms; the code their browser generated rides in on the form.
+  const ref = ctx.addSubscriber({ email: "ref@example.com", status: "active", fields: { referral_code: "alpha-code-01" } });
+  await fireWebhook(ctx, ref.id);
+  assert.equal(ctx.subscribers.get(ref.id).fields.referral_code, "alpha-code-01"); // claimed, not replaced
+  assert.ok(ctx.subscribers.get(ref.id).fields.pledged_at);
 
-  const res = await call(ctx.env, "https://w/referral?email=alice@example.com");
-  const body = await res.json();
+  // Referee pledges through that code and confirms — proving it was registered.
+  const newbie = ctx.addSubscriber({
+    email: "bob@example.com",
+    status: "active",
+    fields: { referred_by: "alpha-code-01", referral_code: "bob-code-0001" },
+  });
+  await fireWebhook(ctx, newbie.id);
 
-  assert.equal(res.status, 200);
-  assert.match(body.referral_code, /^[A-Z2-9]{7}$/);
-  assert.equal(body.referral_count, 0);
-  assert.equal(body.referral_link, `https://james4nationwide.co.uk/pledge/?ref=${body.referral_code}`);
-  // Did not stamp pledged_at — the webhook still needs to credit later.
-  assert.equal([...ctx.subscribers.values()][0].fields.pledged_at, undefined);
-
-  // Stable: a second lookup returns the same code.
-  const again = await (await call(ctx.env, "https://w/referral?email=alice@example.com")).json();
-  assert.equal(again.referral_code, body.referral_code);
+  const lb = await leaderboard(ctx, "alpha-code-01");
+  assert.equal(lb.you.count, 1);
+  assert.equal(ctx.subscribers.get(ref.id).fields.referral_count, 1); // mirrored to MailerLite
 });
 
-test("unknown email returns pending (no pledged/not-pledged oracle)", async () => {
+test("an email never reaches the backend — there is no email lookup endpoint", async () => {
   const ctx = makeEnv();
-  const res = await call(ctx.env, "https://w/referral?email=nobody@example.com");
-  assert.equal(res.status, 202);
-  assert.equal((await res.json()).status, "pending");
+  ctx.addSubscriber({ email: "alice@example.com", status: "active" });
+  const res = await call(ctx.env, "https://w/referral?email=alice@example.com");
+  assert.equal(res.status, 404); // endpoint removed entirely — no oracle
 });
 
 test("confirmation webhook credits the referrer exactly once (idempotent)", async () => {
@@ -182,30 +194,66 @@ test("unconfirmed subscribers are not credited", async () => {
   assert.equal(ctx.subscribers.get(referrer.id).fields.referral_count, 0);
 });
 
-test("a referral through a freshly lazy-minted code is still credited (no KV lag)", async () => {
+test("out-of-order confirmation: a referee who confirms before the referrer is still credited", async () => {
   const ctx = makeEnv();
-  // Referrer pledges and only ever hit the thank-you page (lazy mint), never a webhook.
-  const referrer = ctx.addSubscriber({ email: "early@example.com", status: "unconfirmed" });
-  const look = await (await call(ctx.env, "https://w/referral?email=early@example.com")).json();
-  const code = look.referral_code;
-
-  // Someone signs up through that code and confirms.
-  const newbie = ctx.addSubscriber({ email: "late@example.com", status: "active", fields: { referred_by: code } });
-  await call(ctx.env, "https://w/webhook?token=s3cret", {
-    method: "POST",
-    body: JSON.stringify({ events: [{ data: { subscriber: { id: newbie.id, status: "active" } } }] }),
+  // Referee confirms FIRST, through a code whose owner hasn't confirmed yet.
+  const newbie = ctx.addSubscriber({
+    email: "late@example.com",
+    status: "active",
+    fields: { referred_by: "beta-code-99", referral_code: "newbie-code-1" },
   });
+  await fireWebhook(ctx, newbie.id);
+  // Nothing credited yet — the referral is buffered, not lost.
+  assert.equal((await leaderboard(ctx, "beta-code-99")).you, null);
 
-  const lb = await (await call(ctx.env, "https://w/leaderboard?code=" + code)).json();
-  assert.equal(lb.you.count, 1);
+  // Referrer confirms and registers the code — the buffer flushes.
+  const ref = ctx.addSubscriber({ email: "early@example.com", status: "active", fields: { referral_code: "beta-code-99" } });
+  await fireWebhook(ctx, ref.id);
+  assert.equal((await leaderboard(ctx, "beta-code-99")).you.count, 1);
+  assert.equal(ctx.subscribers.get(ref.id).fields.referral_count, 1); // mirrored
+
+  // Re-delivering either webhook must not double-credit.
+  await fireWebhook(ctx, ref.id);
+  await fireWebhook(ctx, newbie.id);
+  assert.equal((await leaderboard(ctx, "beta-code-99")).you.count, 1);
 });
 
-test("rate limiting kicks in on the public referral endpoint", async () => {
+test("a code collision is resolved first-write-wins; the loser gets a fresh minted code", async () => {
   const ctx = makeEnv();
-  ctx.addSubscriber({ email: "x@example.com", status: "active" });
+  const first = ctx.addSubscriber({ email: "first@example.com", status: "active", fields: { referral_code: "dup-code-007" } });
+  const second = ctx.addSubscriber({ email: "second@example.com", status: "active", fields: { referral_code: "dup-code-007" } });
+  await fireWebhook(ctx, first.id);
+  await fireWebhook(ctx, second.id);
+
+  assert.equal(ctx.subscribers.get(first.id).fields.referral_code, "dup-code-007"); // keeps it
+  const secondCode = ctx.subscribers.get(second.id).fields.referral_code;
+  assert.notEqual(secondCode, "dup-code-007");
+  assert.match(secondCode, /^[A-Z2-9]{7}$/); // server-minted replacement, mirrored back
+
+  // The disputed code still belongs to the first claimant.
+  const newbie = ctx.addSubscriber({ email: "n@example.com", status: "active", fields: { referred_by: "dup-code-007" } });
+  await fireWebhook(ctx, newbie.id);
+  assert.equal((await leaderboard(ctx, "dup-code-007")).you.count, 1);
+  assert.equal(ctx.subscribers.get(first.id).fields.referral_count, 1);
+});
+
+test("a missing or invalid referral_code (old form / migration) is replaced by a minted one", async () => {
+  const ctx = makeEnv();
+  const noCode = ctx.addSubscriber({ email: "old@example.com", status: "active" }); // no referral_code field
+  const badCode = ctx.addSubscriber({ email: "bad@example.com", status: "active", fields: { referral_code: "has spaces & symbols!" } });
+  await fireWebhook(ctx, noCode.id);
+  await fireWebhook(ctx, badCode.id);
+
+  assert.match(ctx.subscribers.get(noCode.id).fields.referral_code, /^[A-Z2-9]{7}$/);
+  assert.match(ctx.subscribers.get(badCode.id).fields.referral_code, /^[A-Z2-9]{7}$/);
+  assert.ok(ctx.subscribers.get(noCode.id).fields.pledged_at);
+});
+
+test("rate limiting kicks in on the public leaderboard endpoint", async () => {
+  const ctx = makeEnv();
   let last;
   for (let i = 0; i < 31; i++) {
-    last = await call(ctx.env, "https://w/referral?email=x@example.com");
+    last = await call(ctx.env, "https://w/leaderboard?code=ABCDEFG");
   }
   assert.equal(last.status, 429);
 });
@@ -228,17 +276,15 @@ test("a confirmation event for a still-unconfirmed subscriber is not credited", 
 
 test("self-referrals are not credited", async () => {
   const ctx = makeEnv();
-  const me = ctx.addSubscriber({ email: "me@example.com", status: "active" });
-  const code = (await (await call(ctx.env, "https://w/referral?email=me@example.com")).json()).referral_code;
-
-  // Reopen own ?ref= link and confirm with the same address.
-  me.fields.referred_by = code;
-  await call(ctx.env, "https://w/webhook?token=s3cret", {
-    method: "POST",
-    body: JSON.stringify({ events: [{ data: { subscriber: { id: me.id, status: "active" } } }] }),
+  // Someone reopened their own ?ref= link, so referred_by == their own code.
+  const me = ctx.addSubscriber({
+    email: "me@example.com",
+    status: "active",
+    fields: { referral_code: "my-own-code-1", referred_by: "my-own-code-1" },
   });
+  await fireWebhook(ctx, me.id);
 
-  const lb = await (await call(ctx.env, "https://w/leaderboard?code=" + code)).json();
+  const lb = await leaderboard(ctx, "my-own-code-1");
   assert.equal(lb.you, null); // count stayed 0
 });
 

@@ -55,9 +55,10 @@ This is the backend (referral codes, leaderboard, staffer API).
 ## Step 3 — MailerLite (web UI)
 Follow `docs/mailerlite-setup.md` — it's all clicks in the MailerLite app:
 1. Create the **`Pledgers`** group and the custom fields.
-2. Build the **embedded pledge form** (with a hidden `referred_by` field); set
-   its success redirect to
-   `https://james4nationwide.co.uk/thank-you/?email={$email}`.
+2. Build the **embedded pledge form** with hidden `referred_by` **and**
+   `referral_code` fields; set its success redirect to the plain
+   `https://james4nationwide.co.uk/thank-you/` (no `?email=`). Add the personal
+   link `…/pledge/?ref={$referral_code}` to the confirmation/welcome email.
 3. **Webhook:** Integrations → Webhooks → add
    `https://<WORKER_BASE>/webhook?token=<WEBHOOK_SECRET>` for the
    subscriber-confirmed/updated event.
