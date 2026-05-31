@@ -79,6 +79,12 @@
       <select id="o-priority"><option value="3">High</option><option value="2" selected>Normal</option><option value="1">Low</option></select>
       <label>Note (public context only)</label>
       <textarea id="o-note" rows="2" placeholder="What's the post about / suggested angle"></textarea>
+      <label>On-duty roster (for round-robin assign) — comma-separated names</label>
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="roster" placeholder="e.g. Alex, Sam, Priya" />
+        <button class="btn btn-gray" onclick="saveRoster()" style="white-space:nowrap">Save roster</button>
+      </div>
+      <p class="muted" id="roster-msg"></p>
       <div style="margin-top:10px; display:flex; gap:8px;">
         <button class="btn btn-green" onclick="addOpp()">Add to queue</button>
         <button class="btn btn-blue" onclick="claim()">Claim next for me</button>
@@ -150,8 +156,20 @@
   }
   function assignAll(){
     api("/staff/assign", { method:"POST", body:"{}" })
-      .then(function(d){ msg("add-msg", d.error ? d.error : ("Assigned "+d.assigned+" to the roster.")); refresh(); })
-      .catch(function(e){ msg("add-msg", e.message); });
+      .then(function(d){ msg("add-msg", "Assigned "+d.assigned+" to the roster."); refresh(); })
+      .catch(function(e){ msg("add-msg", e.message === "no_roster" ? "Set the on-duty roster first, then assign." : e.message); });
+  }
+
+  function loadRoster(){
+    if(!cfg.base) return;
+    api("/staff/roster").then(function(d){ document.getElementById("roster").value = (d.roster||[]).join(", "); })
+      .catch(function(){});
+  }
+  function saveRoster(){
+    var names = val("roster").split(/[,\n]/).map(function(s){ return s.trim(); }).filter(Boolean);
+    api("/staff/roster", { method:"POST", body: JSON.stringify({ roster: names }) })
+      .then(function(d){ msg("roster-msg", (d.roster && d.roster.length) ? "Roster saved: "+d.roster.join(", ") : "Roster cleared."); })
+      .catch(function(e){ msg("roster-msg", e.message); });
   }
 
   function update(id, patch){
@@ -215,7 +233,7 @@
   }
   function stat(label,n){ return '<span class="stat">'+esc(label)+' <b>'+n+'</b></span>'; }
 
-  function refresh(){ loadStats(); loadQueue(); }
+  function refresh(){ loadStats(); loadQueue(); loadRoster(); }
   function val(id){ return document.getElementById(id).value; }
   function msg(id,t){ document.getElementById(id).textContent = t; }
   function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
