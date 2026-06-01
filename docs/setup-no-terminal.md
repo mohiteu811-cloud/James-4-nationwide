@@ -35,7 +35,7 @@ This is the backend (referral codes, leaderboard, staffer API).
 4. Click **Save and Deploy**. Cloudflare builds the project and — because of the
    migration in `wrangler.toml` — creates the two Durable Objects for you.
 5. When it finishes, copy the worker's URL (e.g.
-   `https://james4nationwide-referrals.<account>.workers.dev`). **This is your
+   `https://james-4-nationwide.<account>.workers.dev`). **This is your
    `WORKER_BASE`** — you'll paste it in a few places later.
 
 ### Add the three secrets (still in the dashboard)

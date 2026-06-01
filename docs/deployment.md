@@ -56,7 +56,7 @@ npm run deploy
 ```
 
 Wrangler prints the worker URL, e.g.
-`https://james4nationwide-referrals.<account>.workers.dev`.
+`https://james-4-nationwide.<account>.workers.dev`.
 (Optionally map a custom route like `https://api.james4nationwide.co.uk` in the
 Cloudflare dashboard.)
 

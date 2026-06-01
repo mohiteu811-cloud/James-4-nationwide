@@ -22,7 +22,7 @@ the staffer console to Cloudflare Pages.
 
 > Prefer to do it by hand? See `docs/deployment.md`.
 
-- [ ] Note the printed **worker URL** (e.g. `https://james4nationwide-referrals.<account>.workers.dev`). This is your **`WORKER_BASE`**.
+- [ ] Note the printed **worker URL** (e.g. `https://james-4-nationwide.<account>.workers.dev`). This is your **`WORKER_BASE`**.
 - [ ] Note the printed **Pages URL** for the console (e.g. `https://james4nationwide-console.pages.dev`).
 
 ## 2. MailerLite
