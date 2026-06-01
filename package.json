@@ -1,0 +1,10 @@
+{
+  "name": "james-4-nationwide",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pledge & Remind campaign. The deployable component is the Cloudflare Worker in referral-worker/; these root scripts delegate to it so the repo can also be built/deployed from the root (e.g. Cloudflare's Git build integration with the default root directory).",
+  "scripts": {
+    "test": "npm --prefix referral-worker test",
+    "deploy": "npm --prefix referral-worker install && npm --prefix referral-worker run deploy"
+  }
+}

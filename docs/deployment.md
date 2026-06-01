@@ -60,6 +60,25 @@ Wrangler prints the worker URL, e.g.
 (Optionally map a custom route like `https://api.james4nationwide.co.uk` in the
 Cloudflare dashboard.)
 
+### Deploying via Cloudflare's Git integration (Workers Builds)
+
+If instead of the CLI you connect this repo to Cloudflare in the dashboard,
+remember the worker lives in the **`referral-worker/` subdirectory** — not the
+repo root. Set the build configuration to either:
+
+- **Root directory:** `referral-worker` · **Build:** `npm install` · **Deploy:** `npx wrangler deploy` *(recommended — one field)*, **or**
+- leave the root directory at `/` and set the **Deploy command** to `npm run deploy` (the root `package.json` delegates into `referral-worker/`).
+
+A build that runs `npm install` at the repo root with no overrides will fail
+with `ENOENT … /repo/package.json` because the worker's `package.json` is in the
+subdirectory. Make sure the project type is **Workers** (not Pages) — the
+Durable Objects require a Worker.
+
+> Prefer GitHub Actions? The bundled `.github/workflows/deploy-worker.yml`
+> already builds from `referral-worker/`. Enable it by setting the repo variable
+> `ENABLE_CF_DEPLOY=true` and the `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`
+> repo secrets.
+
 ## 6. Wire it up
 
 - **Thank-you page:** in `wordpress/thank-you-page.html`, replace `WORKER_BASE`
