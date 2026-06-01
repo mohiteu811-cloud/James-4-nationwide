@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>James4Nationwide — Pledge &amp; Remind demo</title>
+<style>
+  :root { --green:#0b6e4f; --blue:#1d4ed8; --gold:#b8860b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#f3f4f6; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:#111827; }
+  .wrap { max-width:760px; margin:0 auto; padding:24px 16px 60px; }
+  .note { background:#fffbeb; border:1px solid #fcd34d; border-radius:8px; padding:10px 14px; font-size:14px; color:#7a5901; margin-bottom:20px; }
+  .phone { max-width:420px; margin:0 auto; background:#fff; border:3px solid #111827; border-radius:28px; padding:22px; box-shadow:0 10px 30px rgba(0,0,0,.12); }
+  .bar { background:#111827; color:#fff; font-size:11px; text-align:center; border-radius:14px; padding:6px; margin:-6px -6px 16px; word-break:break-all; }
+  h1 { font-size:1.7rem; line-height:1.15; margin:.2rem 0 .6rem; }
+  h1.ty { font-size:1.4rem; }
+  p { line-height:1.55; font-size:1.02rem; }
+  .trigger { font-weight:700; background:#fff3cd; border-left:6px solid var(--gold); padding:.8rem 1rem; border-radius:6px; margin:1rem 0; color:#7a5901; }
+  input[type=email], input[type=text] { width:100%; min-height:50px; font-size:1.05rem; padding:0 .8rem; border:2px solid #374151; border-radius:6px; }
+  .btn { min-height:50px; padding:0 1.1rem; font-size:1.05rem; font-weight:700; border:0; border-radius:6px; cursor:pointer; color:#fff; }
+  .btn-green { background:var(--green); width:100%; }
+  .btn-blue { background:var(--blue); }
+  .fine { font-size:.9rem; color:#6b7280; }
+  .count { background:#ecfdf5; color:var(--green); font-weight:700; font-size:1.25rem; text-align:center; padding:.8rem; border-radius:6px; margin:1rem 0; }
+  .linkrow { display:flex; gap:.5rem; margin:1rem 0; }
+  .linkrow input { flex:1; }
+  .share { display:flex; gap:.5rem; flex-wrap:wrap; }
+  .share .btn-blue { flex:1; }
+  .hidden { display:none; }
+  .sim { max-width:420px; margin:18px auto 0; text-align:center; }
+  .sim button { background:#374151; color:#fff; border:0; border-radius:6px; padding:10px 14px; font-size:.95rem; cursor:pointer; }
+  .step-label { text-align:center; font-weight:700; color:#374151; margin:18px 0 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="note">
+    <strong>Demo only.</strong> This simulates the real flow with mock data — no email is sent and no worker is called.
+    The live version uses your MailerLite form + the Cloudflare referral worker in this repo.
+  </div>
+
+  <!-- ============ SCREEN 1: PLEDGE ============ -->
+  <div id="screen-pledge">
+    <div class="step-label">Step 1 — the /pledge page (a supporter arrives via someone's link)</div>
+    <div class="phone">
+      <div class="bar" id="bar1">james4nationwide.co.uk/pledge/?ref=K7M9P2Q</div>
+      <h1>Pledge to vote.</h1>
+      <p>There's a real choice on this year's Nationwide ballot — but the form is built to hide it. Pledge now and we'll send you one reminder the day your ballot lands. No spam, just the nudge to vote.</p>
+      <div class="trigger">Don't Quick Vote. Scroll down. Vote FOR Sherwin-Smith.</div>
+      <p style="margin:.4rem 0 .6rem"><input type="email" id="email" placeholder="your@email.com" aria-label="Email" /></p>
+      <button class="btn btn-green" id="pledgeBtn">Pledge to vote</button>
+      <p class="fine">Double opt-in: you'll get one email to confirm. Unsubscribe any time.<br>
+      <span style="color:var(--blue)">hidden field referred_by = K7M9P2Q (captured from the URL)</span></p>
+    </div>
+  </div>
+
+  <!-- ============ SCREEN 2: CONFIRM ============ -->
+  <div id="screen-confirm" class="hidden">
+    <div class="step-label">Step 2 — MailerLite sends one confirmation email (double opt-in)</div>
+    <div class="phone">
+      <div class="bar">Inbox · MailerLite</div>
+      <h1 class="ty">Confirm your pledge</h1>
+      <p>Hi — please confirm you want reminders to vote in the Nationwide board election.</p>
+      <button class="btn btn-green" id="confirmBtn">Confirm my email</button>
+      <p class="fine">Clicking this is what makes the referral count — unconfirmed pledges are never credited.</p>
+    </div>
+  </div>
+
+  <!-- ============ SCREEN 3: THANK-YOU ============ -->
+  <div id="screen-ty" class="hidden">
+    <div class="step-label">Step 3 — the thank-you page: personal link + live count + sharing</div>
+    <div class="phone">
+      <div class="bar">james4nationwide.co.uk/thank-you/</div>
+      <h1 class="ty">Thank you — you've pledged to vote.</h1>
+      <p>Your email is confirmed. That's it — we'll remind you the day your ballot lands.</p>
+      <div class="trigger">Don't Quick Vote. Scroll down. Vote FOR Sherwin-Smith.</div>
+      <div class="count" id="count">You've brought in 0 voters.</div>
+      <p><strong>Now multiply your vote.</strong> Share your personal link — every member who pledges through it counts.</p>
+      <div class="linkrow">
+        <input type="text" id="myLink" readonly />
+        <button class="btn btn-green" id="copyBtn">Copy</button>
+      </div>
+      <div class="share">
+        <a class="btn btn-blue" id="wa" target="_blank" rel="noopener" style="text-align:center;line-height:50px;text-decoration:none">WhatsApp</a>
+        <a class="btn btn-blue" id="fb" target="_blank" rel="noopener" style="text-align:center;line-height:50px;text-decoration:none">Facebook</a>
+        <a class="btn btn-blue" id="em" target="_blank" rel="noopener" style="text-align:center;line-height:50px;text-decoration:none">Email</a>
+      </div>
+    </div>
+    <div class="sim">
+      <button id="simBtn">▶ Simulate: another member pledges through your link</button>
+      <p class="fine">Watch your count tick up — that's the referral worker crediting you on each confirmation.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+  var SHARE_TEXT = "Nationwide members: there's a real choice on this year's ballot, but the form is built to hide it. Don't Quick Vote — scroll down and vote FOR Sherwin-Smith. Pledge + get a reminder: ";
+  var myCode = "B4T2KX9"; // would be minted by the worker on confirmation
+  var myLink = "https://james4nationwide.co.uk/pledge/?ref=" + myCode;
+  var count = 0;
+
+  function show(id) {
+    ["screen-pledge","screen-confirm","screen-ty"].forEach(function(s){
+      document.getElementById(s).classList.toggle("hidden", s !== id);
+    });
+    window.scrollTo(0,0);
+  }
+
+  document.getElementById("pledgeBtn").onclick = function(){ show("screen-confirm"); };
+  document.getElementById("confirmBtn").onclick = function(){
+    document.getElementById("myLink").value = myLink;
+    var msg = encodeURIComponent(SHARE_TEXT + myLink), url = encodeURIComponent(myLink);
+    document.getElementById("wa").href = "https://wa.me/?text=" + msg;
+    document.getElementById("fb").href = "https://www.facebook.com/sharer/sharer.php?u=" + url;
+    document.getElementById("em").href = "mailto:?subject=" + encodeURIComponent("A real choice on the Nationwide ballot") + "&body=" + msg;
+    show("screen-ty");
+  };
+  document.getElementById("copyBtn").onclick = function(){
+    var i = document.getElementById("myLink"); i.select();
+    try { navigator.clipboard.writeText(i.value); } catch(e){}
+    this.textContent = "Copied!"; var b=this; setTimeout(function(){ b.textContent="Copy"; },1500);
+  };
+  document.getElementById("simBtn").onclick = function(){
+    count++;
+    document.getElementById("count").textContent =
+      "You've brought in " + count + (count===1 ? " voter." : " voters.");
+  };
+</script>
+</body>
+</html>

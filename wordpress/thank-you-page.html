@@ -1,0 +1,127 @@
+<!--
+  Thank-you page — paste into a BlockArt "Custom HTML" block.
+
+  Set this page as the MailerLite form's "after submit" redirect — just the
+  plain URL, NO query string:
+      https://james4nationwide.co.uk/thank-you/
+  No email is passed (and none is needed): the personal referral code was
+  generated in the browser on the pledge page and stored locally, so this page
+  shows the share link instantly with no backend lookup. The confirmation email
+  also contains the link, so anyone confirming on a different device still gets it.
+
+  Replace WORKER_BASE below with your deployed worker URL, e.g.
+      https://james4nationwide-referrals.<account>.workers.dev
+  or a custom route like https://api.james4nationwide.co.uk
+-->
+<style>
+  .j4n-ty { max-width: 640px; margin: 0 auto; padding: 1.25rem; font-size: 1.125rem; line-height: 1.6; color: #111827; }
+  .j4n-ty h1 { font-size: clamp(1.8rem, 5vw, 2.4rem); margin: 0 0 0.75rem; }
+  .j4n-count { font-size: 1.3rem; font-weight: 700; margin: 1rem 0; }
+  .j4n-linkbox { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0; }
+  .j4n-linkbox input { flex: 1 1 240px; min-height: 52px; font-size: 1.05rem; padding: 0 0.75rem; border: 2px solid #374151; border-radius: 6px; }
+  .j4n-btn { display: inline-block; min-height: 52px; line-height: 52px; padding: 0 1.1rem; font-size: 1.05rem; font-weight: 700; border-radius: 6px; text-decoration: none; border: 0; cursor: pointer; }
+  .j4n-btn-primary { background: #0b6e4f; color: #fff; }
+  .j4n-btn-secondary { background: #1d4ed8; color: #fff; }
+  .j4n-share { display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 1rem 0; }
+  .j4n-trigger { font-weight: 700; background: #fff3cd; border-left: 6px solid #b8860b; padding: 0.9rem 1.1rem; border-radius: 6px; }
+  .j4n-muted { color: #374151; font-size: 0.95rem; }
+</style>
+
+<section class="j4n-ty">
+  <h1>Thank you — you've pledged to vote.</h1>
+  <p>Check your inbox for one confirmation email and click the link inside. That's it.</p>
+
+  <p class="j4n-trigger">Don't Quick Vote. Scroll down. Vote FOR Sherwin-Smith.</p>
+
+  <p class="j4n-count" id="j4n-count" hidden></p>
+
+  <p><strong>Now multiply your vote.</strong> Share your personal link — every
+  member who pledges through it makes the choice on the ballot harder to hide.</p>
+
+  <div class="j4n-linkbox">
+    <input id="j4n-link" type="text" readonly aria-label="Your personal referral link" value="Your link is loading…" />
+    <button class="j4n-btn j4n-btn-primary" id="j4n-copy" type="button">Copy link</button>
+  </div>
+
+  <div class="j4n-share" id="j4n-share" hidden>
+    <a class="j4n-btn j4n-btn-secondary" id="j4n-wa" target="_blank" rel="noopener">Share on WhatsApp</a>
+    <a class="j4n-btn j4n-btn-secondary" id="j4n-fb" target="_blank" rel="noopener">Share on Facebook</a>
+    <a class="j4n-btn j4n-btn-secondary" id="j4n-em" target="_blank" rel="noopener">Share by email</a>
+  </div>
+
+  <p class="j4n-muted">Opened this on a different device? Your personal link is also in the confirmation email we just sent.</p>
+</section>
+
+<script>
+  (function () {
+    var WORKER_BASE = "WORKER_BASE"; // <-- replace with your deployed worker URL
+
+    var SHARE_TEXT =
+      "Nationwide members: there's a real choice on this year's ballot, but the form is built to hide it. " +
+      "Don't Quick Vote — scroll down and vote FOR Sherwin-Smith. Pledge + get a reminder: ";
+
+    function render(link, count) {
+      document.getElementById("j4n-link").value = link;
+
+      var countEl = document.getElementById("j4n-count");
+      if (typeof count === "number") {
+        countEl.textContent =
+          count === 1
+            ? "You've brought in 1 voter."
+            : "You've brought in " + count + " voters.";
+        countEl.hidden = false;
+      }
+
+      var msg = encodeURIComponent(SHARE_TEXT + link);
+      var url = encodeURIComponent(link);
+      document.getElementById("j4n-wa").href = "https://wa.me/?text=" + msg;
+      document.getElementById("j4n-fb").href =
+        "https://www.facebook.com/sharer/sharer.php?u=" + url;
+      document.getElementById("j4n-em").href =
+        "mailto:?subject=" +
+        encodeURIComponent("There's a real choice on the Nationwide ballot") +
+        "&body=" + msg;
+      document.getElementById("j4n-share").hidden = false;
+    }
+
+    var FALLBACK =
+      "Your link is in the confirmation email we just sent — open it on this " +
+      "device to see it here.";
+
+    // The personal code was generated in the browser on the pledge page and
+    // stored locally, so the share link is available instantly — no email, no
+    // backend lookup, no polling. We only call the backend to fetch the live
+    // referral count, keyed on the code (a bearer token the visitor holds),
+    // which reveals nothing about anyone else.
+    var code = null;
+    try { code = localStorage.getItem("j4n_my_code"); } catch (e) {}
+
+    if (code) {
+      var link = window.location.origin + "/pledge/?ref=" + encodeURIComponent(code);
+      render(link, null); // show the link immediately
+
+      fetch(WORKER_BASE + "/leaderboard?code=" + encodeURIComponent(code))
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (data) {
+          var count = data && data.you && typeof data.you.count === "number" ? data.you.count : 0;
+          render(link, count);
+        })
+        .catch(function () {});
+    } else {
+      document.getElementById("j4n-link").value = FALLBACK;
+    }
+
+    document.getElementById("j4n-copy").addEventListener("click", function () {
+      var input = document.getElementById("j4n-link");
+      input.select();
+      try {
+        navigator.clipboard.writeText(input.value);
+      } catch (e) {
+        document.execCommand("copy");
+      }
+      this.textContent = "Copied!";
+      var btn = this;
+      setTimeout(function () { btn.textContent = "Copy link"; }, 2000);
+    });
+  })();
+</script>

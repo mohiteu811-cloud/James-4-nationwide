@@ -1,0 +1,47 @@
+name: Deploy worker
+
+# Auto-deploys the Cloudflare Worker on pushes to main that touch it.
+# Requires two repo secrets (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   — token with "Edit Cloudflare Workers" permission
+#   CLOUDFLARE_ACCOUNT_ID  — your Cloudflare account id
+#
+# The worker's own secrets (MAILERLITE_API_TOKEN, WEBHOOK_SECRET, STAFF_TOKEN)
+# are set once with `wrangler secret put` (or ./deploy.sh) and persist on
+# Cloudflare — they are NOT needed here.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "referral-worker/**"
+      - ".github/workflows/deploy-worker.yml"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Opt-in: only runs if you set repo variable ENABLE_CF_DEPLOY = true.
+    # Leave it unset if you deploy via Cloudflare's own Git integration (web UI).
+    if: ${{ vars.ENABLE_CF_DEPLOY == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: referral-worker
+        run: npm install --no-audit --no-fund
+
+      - name: Run tests
+        working-directory: referral-worker
+        run: npm test
+
+      - name: Deploy to Cloudflare
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: referral-worker
+          command: deploy

@@ -1,0 +1,196 @@
+<!--
+  /pledge page — paste into a BlockArt "Custom HTML" block on the WordPress page.
+
+  WHAT YOU MUST DO:
+  1. Replace the <!-- MAILERLITE FORM --> block with your MailerLite embedded
+     form for the Pledgers group (Forms -> Embedded form -> copy the HTML).
+  2. In MailerLite, add TWO HIDDEN fields to that form, mapped to the custom
+     fields `referred_by` and `referral_code`. Their <input>s will be named
+     fields[referred_by] and fields[referral_code] — the script at the bottom
+     finds them automatically (and creates them if the builder won't let you).
+  3. Keep double opt-in ON for the Pledgers group (Build Brief §6).
+
+  PRIVACY: the subscriber's own referral code is generated *in the browser* and
+  carried through the form, so their email never reaches our backend and there
+  is no way to look anyone up by email. The thank-you page reads the same code
+  from this browser to show the share link instantly.
+
+  Accessibility: large tap targets, high-contrast text, AA colour contrast —
+  the audience skews older (§7.6).
+-->
+<style>
+  .j4n-pledge {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 1.25rem;
+    font-size: 1.125rem;
+    line-height: 1.6;
+    color: #111827;
+  }
+  .j4n-pledge h1 {
+    font-size: clamp(1.9rem, 5vw, 2.6rem);
+    line-height: 1.15;
+    margin: 0 0 0.75rem;
+  }
+  .j4n-pledge .j4n-sub {
+    font-size: 1.2rem;
+    margin: 0 0 1.5rem;
+  }
+  .j4n-trigger {
+    font-weight: 700;
+    font-size: 1.25rem;
+    background: #fff3cd;
+    border-left: 6px solid #b8860b;
+    padding: 0.9rem 1.1rem;
+    margin: 1.5rem 0;
+    border-radius: 6px;
+  }
+  .j4n-form-wrap {
+    margin: 1.5rem 0;
+  }
+  /* Make any MailerLite button/input inside this page big and tappable. */
+  .j4n-pledge input[type="email"],
+  .j4n-pledge input[type="text"],
+  .j4n-pledge button,
+  .j4n-pledge .ml-form-embedSubmit button {
+    min-height: 52px;
+    font-size: 1.125rem;
+  }
+  .j4n-fineprint {
+    font-size: 0.95rem;
+    color: #374151;
+    margin-top: 1rem;
+  }
+</style>
+
+<section class="j4n-pledge">
+  <h1>Pledge to vote.</h1>
+  <p class="j4n-sub">
+    There's a real choice on this year's Nationwide ballot — but the form is
+    built to hide it. Pledge now and we'll send you one reminder the day your
+    ballot lands. No spam, just the nudge to vote.
+  </p>
+
+  <p class="j4n-trigger">
+    Don't Quick Vote. Scroll down. Vote FOR Sherwin-Smith.
+  </p>
+
+  <div class="j4n-form-wrap">
+    <!-- ============================================================== -->
+    <!-- MAILERLITE FORM: paste your embedded Pledgers form HTML here.  -->
+    <!-- It must include an email field and a hidden `referred_by`      -->
+    <!-- field (input name: fields[referred_by]).                       -->
+    <!-- ============================================================== -->
+    <!-- MAILERLITE FORM -->
+  </div>
+
+  <p class="j4n-fineprint">
+    Double opt-in: you'll get one email to confirm. We only ever use your email
+    to remind you to vote. You can unsubscribe at any time.
+  </p>
+</section>
+
+<script>
+  (function () {
+    var REF_KEY = "j4n_ref";       // the referrer who sent me here (if any)
+    var MY_KEY = "j4n_my_code";    // THIS browser's own referral code
+    var TTL_MS = 45 * 24 * 60 * 60 * 1000; // attribution window: 45 days
+
+    /* ---- 1. Capture an incoming ?ref=CODE (my referrer) ---- */
+    try {
+      var params = new URLSearchParams(window.location.search);
+      var incoming = params.get("ref");
+      if (incoming) {
+        incoming = incoming.trim().slice(0, 32);
+        if (incoming) localStorage.setItem(REF_KEY, JSON.stringify({ code: incoming, ts: Date.now() }));
+      }
+    } catch (e) {}
+
+    // Read the stored referrer code, honouring the TTL. An old code left in
+    // localStorage (someone returns directly later, or a shared device) is
+    // ignored and cleared, so a direct pledge isn't credited to a stale referrer.
+    var ref = null;
+    try {
+      var raw = localStorage.getItem(REF_KEY);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (typeof parsed === "string") parsed = { code: parsed, ts: Date.now() }; // legacy format
+        if (parsed && parsed.code && Date.now() - (parsed.ts || 0) < TTL_MS) ref = parsed.code;
+        else localStorage.removeItem(REF_KEY);
+      }
+    } catch (e) {}
+
+    /* ---- 2. This browser's OWN referral code ---- */
+    var myCodeCache = null; // one stable code per page load (survives storage being blocked)
+    // Generated in the browser (so the email never reaches our backend) with
+    // ~80 bits of entropy, URL-safe. Created ONCE and reused forever —
+    // regenerating would orphan links already shared. Minted lazily at submit
+    // so an idle visitor who never pledges never gets one.
+    function genCode() {
+      var alphabet = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789-_";
+      var buf = new Uint8Array(16);
+      (window.crypto || window.msCrypto).getRandomValues(buf);
+      var out = "";
+      for (var i = 0; i < buf.length; i++) out += alphabet[buf[i] % alphabet.length];
+      return out;
+    }
+    function myCode(create) {
+      if (myCodeCache) return myCodeCache;
+      var code = null;
+      try { code = localStorage.getItem(MY_KEY); } catch (e) {}
+      if (!code && create) {
+        try { code = genCode(); } catch (e) { return null; } // no crypto: let the server mint one
+        // Persist best-effort. If storage is blocked (private mode, quota), we
+        // STILL submit the freshly generated code so it rides through MailerLite
+        // into the mirror + confirmation-email link — the share link works even
+        // though this device can't later show it on the thank-you page.
+        try { localStorage.setItem(MY_KEY, code); } catch (e) {}
+      }
+      if (code) myCodeCache = code; // stable for the page's lifetime, even if unpersisted
+      return code;
+    }
+
+    /* ---- 3. Inject both fields into the MailerLite form ---- */
+    function setField(form, name, value) {
+      var input = form.querySelector('[name="' + name + '"]');
+      if (!input) {
+        input = document.createElement("input");
+        input.type = "hidden";
+        input.name = name;
+        form.appendChild(input);
+      }
+      input.value = value;
+    }
+    // create=false before submit (don't mint a code for someone just browsing);
+    // create=true on submit (guarantee the code exists by the time they pledge).
+    function inject(create) {
+      var forms = document.querySelectorAll(".j4n-form-wrap form");
+      forms.forEach(function (form) {
+        var mine = myCode(create);
+        if (mine) setField(form, "fields[referral_code]", mine);
+        if (ref) setField(form, "fields[referred_by]", ref);
+      });
+    }
+
+    if (document.readyState !== "loading") inject(false);
+    else document.addEventListener("DOMContentLoaded", function () { inject(false); });
+
+    // The MailerLite embed is a third-party async form that can appear at any
+    // time (slow mobile, deferred scripts). A MutationObserver keeps watching
+    // for the whole life of the page instead of giving up after a few seconds,
+    // so late-rendered forms still carry the fields.
+    if (window.MutationObserver) {
+      var observer = new MutationObserver(function () { inject(false); });
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
+    // Belt-and-braces: mint (if needed) and inject right before any submit, then
+    // clear the stored referrer so a later direct pledge on this device isn't
+    // attributed to it. The browser's own code (MY_KEY) is kept forever.
+    document.addEventListener("submit", function (e) {
+      if (e.target && e.target.closest && e.target.closest(".j4n-form-wrap")) {
+        inject(true);
+        try { localStorage.removeItem(REF_KEY); } catch (e2) {}
+      }
+    }, true);
+  })();
+</script>

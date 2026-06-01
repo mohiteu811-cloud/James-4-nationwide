@@ -1,0 +1,15 @@
+{
+  "name": "james4nationwide-referral-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Referral attribution layer for the James4Nationwide Pledge & Remind campaign (MailerLite-native, Cloudflare Worker).",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "wrangler": "^3.80.0"
+  }
+}
