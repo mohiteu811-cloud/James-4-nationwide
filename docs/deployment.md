@@ -40,6 +40,13 @@ npx wrangler secret put STAFF_TOKEN            # a DIFFERENT random string for t
 
 Generate a good secret with: `openssl rand -hex 24`
 
+> **Deploying via the dashboard / Git integration?** Builds deploy **code and
+> `vars` only — they do not set secrets.** Add the three secrets once under
+> **Settings → Variables and Secrets** (type: *Secret*); adding one rolls out a
+> new version automatically, so no rebuild is needed. Until they exist the worker
+> fails closed: `/webhook` and `/staff/*` return `401` and MailerLite API calls
+> fail. Quick check: `<WORKER_BASE>/webhook?token=WRONG` should return `401`.
+
 ## 4. (Optional) set the site origin
 
 `SITE_BASE_URL` in `wrangler.toml` defaults to `https://james4nationwide.co.uk`.
@@ -74,10 +81,25 @@ with `ENOENT … /repo/package.json` because the worker's `package.json` is in t
 subdirectory. Make sure the project type is **Workers** (not Pages) — the
 Durable Objects require a Worker.
 
+**Deploy command must be `npx wrangler deploy`, not `npx wrangler versions
+upload`.** This worker declares a Durable Object migration (`new_sqlite_classes`
+in `wrangler.toml`), and versioned uploads cannot apply migrations — they fail
+with `code: 10211`. This applies to **both** the production deploy command **and
+the "Non-production branch deploy command"** (Workers Builds defaults the latter
+to `versions upload`). So if non-production branch builds are enabled, set that
+command to `npx wrangler deploy` too — but note that then **every push to a
+non-production branch deploys it to the live Worker.** Once you deploy from
+`main`, either disable non-production branch builds or only push deploy-ready
+code to connected branches.
+
+> The worker `name` in `wrangler.toml` must match the Workers Builds project
+> name, or each build warns about a mismatch and offers to open a reconciling
+> PR. This repo uses `james-4-nationwide`.
+
 > Prefer GitHub Actions? The bundled `.github/workflows/deploy-worker.yml`
-> already builds from `referral-worker/`. Enable it by setting the repo variable
-> `ENABLE_CF_DEPLOY=true` and the `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`
-> repo secrets.
+> already builds from `referral-worker/` with `wrangler deploy`. Enable it by
+> setting the repo variable `ENABLE_CF_DEPLOY=true` and the
+> `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` repo secrets.
 
 ## 6. Wire it up
 
