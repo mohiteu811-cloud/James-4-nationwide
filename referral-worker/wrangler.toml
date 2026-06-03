@@ -14,12 +14,21 @@ class_name = "ReferralLedger"
 name = "OUTREACH_QUEUE"
 class_name = "OutreachQueue"
 
+[observability]
+enabled = false
+head_sampling_rate = 1
+
 [observability.logs]
 enabled = true
+head_sampling_rate = 1
+persist = true
 invocation_logs = true
 
 [observability.traces]
 enabled = true
+persist = true
+head_sampling_rate = 1
+
 
 # SQLite-backed Durable Objects are available on the Workers Free plan.
 [[migrations]]
