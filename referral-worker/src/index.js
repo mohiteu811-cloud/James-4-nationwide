@@ -839,7 +839,7 @@ function clamp(n, lo, hi) {
 }
 
 function shareBase(env) {
-  return (env.SITE_BASE_URL || "https://james4nationwide.co.uk").replace(/\/+$/, "");
+  return (env.SITE_BASE_URL || "https://james4nationwide.co.uk/");//.replace(/\/+$/, "");
 }
 
 function today() {
