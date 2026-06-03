@@ -1,5 +1,5 @@
 function j4nInit() {
-  var WORKER_BASE = "https://pledge.james4nw.com";
+  var WORKER_BASE = "http://pledge.james4nw.com";
 
   var SHARE_TEXT =
     "Nationwide members: there's a real choice on this year's ballot, but the form is built to hide it. " +
