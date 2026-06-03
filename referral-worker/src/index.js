@@ -84,6 +84,9 @@ export default {
 /* -------------------------------------------------------------------------- */
 
 async function handleWebhook(request, env) {
+  if (!env.MAILERLITE_API_KEY && !env.MAILERLITE_API_TOKEN) {
+    return new Response('Missing API key', { status: 500 });
+  }
   // The webhook URL is the secret. MailerLite lets you set a custom URL, so we
   // require a shared token (query ?token= or X-Webhook-Token header) and verify
   // it in constant time. Configure the same value as the WEBHOOK_SECRET secret.
@@ -741,10 +744,14 @@ async function hashId(value) {
 /* -------------------------------------------------------------------------- */
 
 async function mlFetch(env, method, path, body) {
+  const apiKey = env.MAILERLITE_API_TOKEN || env.MAILERLITE_API_KEY;
+  if (!apiKey) {
+    return { status: 500, data: null };
+  }
   const res = await fetch(`${ML_API}${path}`, {
     method,
     headers: {
-      Authorization: `Bearer ${env.MAILERLITE_API_TOKEN}`,
+      Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
       Accept: "application/json",
     },
