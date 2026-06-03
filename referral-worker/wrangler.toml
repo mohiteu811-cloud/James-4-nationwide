@@ -14,6 +14,13 @@ class_name = "ReferralLedger"
 name = "OUTREACH_QUEUE"
 class_name = "OutreachQueue"
 
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+
 # SQLite-backed Durable Objects are available on the Workers Free plan.
 [[migrations]]
 tag = "v1"
