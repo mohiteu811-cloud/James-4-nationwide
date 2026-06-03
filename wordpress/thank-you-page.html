@@ -1,7 +1,7 @@
 <!--
-  Thank-you page — paste into a BlockArt "Custom HTML" block.
+  Thank-you page - paste into a BlockArt "Custom HTML" block.
 
-  Set this page as the MailerLite form's "after submit" redirect — just the
+  Set this page as the MailerLite form's "after submit" redirect - just the
   plain URL, NO query string:
       https://james4nationwide.co.uk/thank-you/
   No email is passed (and none is needed): the personal referral code was
@@ -28,18 +28,18 @@
 </style>
 
 <section class="j4n-ty">
-  <h1>Thank you — you've pledged to vote.</h1>
+  <h1>Thank you - you've pledged to vote.</h1>
   <p>Check your inbox for one confirmation email and click the link inside. That's it.</p>
 
   <p class="j4n-trigger">Don't Quick Vote. Scroll down. Vote FOR Sherwin-Smith.</p>
 
   <p class="j4n-count" id="j4n-count" hidden></p>
 
-  <p><strong>Now multiply your vote.</strong> Share your personal link — every
+  <p><strong>Now multiply your vote.</strong> Share your personal link - every
   member who pledges through it makes the choice on the ballot harder to hide.</p>
 
   <div class="j4n-linkbox">
-    <input id="j4n-link" type="text" readonly aria-label="Your personal referral link" value="Your link is loading…" />
+    <input id="j4n-link" type="text" readonly aria-label="Your personal referral link" value="Your link is loading..." />
     <button class="j4n-btn j4n-btn-primary" id="j4n-copy" type="button">Copy link</button>
   </div>
 
@@ -58,7 +58,7 @@
 
     var SHARE_TEXT =
       "Nationwide members: there's a real choice on this year's ballot, but the form is built to hide it. " +
-      "Don't Quick Vote — scroll down and vote FOR Sherwin-Smith. Pledge + get a reminder: ";
+      "Don't Quick Vote - scroll down and vote FOR Sherwin-Smith. Pledge + get a reminder: ";
 
     function render(link, count) {
       document.getElementById("j4n-link").value = link;
@@ -85,11 +85,11 @@
     }
 
     var FALLBACK =
-      "Your link is in the confirmation email we just sent — open it on this " +
+      "Your link is in the confirmation email we just sent - open it on this " +
       "device to see it here.";
 
     // The personal code was generated in the browser on the pledge page and
-    // stored locally, so the share link is available instantly — no email, no
+    // stored locally, so the share link is available instantly - no email, no
     // backend lookup, no polling. We only call the backend to fetch the live
     // referral count, keyed on the code (a bearer token the visitor holds),
     // which reveals nothing about anyone else.
