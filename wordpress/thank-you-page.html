@@ -93,8 +93,28 @@
     // backend lookup, no polling. We only call the backend to fetch the live
     // referral count, keyed on the code (a bearer token the visitor holds),
     // which reveals nothing about anyone else.
+    function readFromUrlParams() {
+      try {
+        var params = new URLSearchParams(window.location.search || window.location.hash.replace(/^#/, '?'));
+        var candidates = ['ref', 'referral_code', 'fields[referral_code]', 'code', 'j4n_my_code'];
+        for (var i = 0; i < candidates.length; i++) {
+          var v = params.get(candidates[i]);
+          if (v) return v.trim().slice(0, 32);
+        }
+      } catch (e) {}
+      try {
+        var frag = window.location.hash;
+        if (frag && frag.indexOf('ref=') !== -1) {
+          var m = frag.match(/ref=([^&]+)/);
+          if (m) return decodeURIComponent(m[1]).trim().slice(0, 32);
+        }
+      } catch (e) {}
+      return null;
+    }
+
     var code = null;
     try { code = localStorage.getItem("j4n_my_code"); } catch (e) {}
+    if (!code) code = readFromUrlParams();
 
     if (code) {
       var link = window.location.origin + "/pledge/?ref=" + encodeURIComponent(code);
